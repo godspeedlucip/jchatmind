@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: jchatmind
+  datasource:
+    url: jdbc:postgresql://localhost:5432/jchatmind
+    username: root
+    password: 123456
+    driver-class-name: org.postgresql.Driver
+  #  mail:
+#    host: smtp.qq.com
+#    port: 587
+#    username: your-email
+#    password: your-password # ?????
+#    default-encoding: UTF-8
+#    properties:
+#      mail:
+#        smtp:
+#          auth: true
+#          starttls:
+#            enable: true
+#            required: true
+  ai:
+    openai:
+      api-key: ${springAI.openai.api-key}
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      chat:
+        options:
+          model: qwen3-next-80b-a3b-instruct
+          extra-body:
+            enable_thinking: true
+        memory:
+          repository:
+            jdbc:
+              initialize-schema: always # ????
+              schema: classpath:sql/chatHistory.sql # ????
+      embedding:
+        options:
+          model: text-embedding-v3
+          dimensions: 1024
+mybatis:
+  type-aliases-package: com.main.jchatmind.model.entity
+  mapper-locations: classpath:mapper/*.xml
+  type-handlers-package: com.main.jchatmind.typehandler
+
+document:
+  storage:
+    base-path: ./data/documents
