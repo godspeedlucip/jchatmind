@@ -14,16 +14,17 @@ public class RedisConfig {
     public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
         RedisTemplate<String, Object> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
-        
+
         // 使用 String 序列化规则序列化键
         template.setKeySerializer(new StringRedisSerializer());
         // 使用 Jackson 序列化规则序列化值
         template.setValueSerializer(new GenericJackson2JsonRedisSerializer());
-        
+
         template.setHashKeySerializer(new StringRedisSerializer());
         template.setHashValueSerializer(new GenericJackson2JsonRedisSerializer());
-        
+
         template.afterPropertiesSet();
         return template;
+
     }
 }
