@@ -92,6 +92,12 @@
             <artifactId>mybatis-spring-boot-starter</artifactId>
             <version>3.0.3</version>
         </dependency>
+        
+        <!-- Redis 缓存 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
 
         <!-- Spring AI 相关模型, deepseek 和 zhipuai -->
         <dependency>

@@ -17,15 +17,18 @@ import com.kama.jchatmind.model.dto.KnowledgeBaseDTO;
 import com.kama.jchatmind.model.entity.Agent;
 import com.kama.jchatmind.model.entity.KnowledgeBase;
 import com.kama.jchatmind.service.ChatMessageFacadeService;
+import com.kama.jchatmind.service.RagService;
 import com.kama.jchatmind.service.SseService;
 import com.kama.jchatmind.service.ToolFacadeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.aop.support.AopUtils;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -46,6 +49,9 @@ public class JChatMindFactory {
     private final ToolFacadeService toolFacadeService;
     private final ChatMessageFacadeService chatMessageFacadeService;
     private final ChatMessageConverter chatMessageConverter;
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final com.kama.jchatmind.service.MemorySummarizationService memorySummarizationService;
+    private final RagService ragService;
 
     // 修复了严重的并发级别 BUG：删除了原本的成员变量 private AgentDTO agentConfig;
 
@@ -58,7 +64,10 @@ public class JChatMindFactory {
             KnowledgeBaseConverter knowledgeBaseConverter,
             ToolFacadeService toolFacadeService,
             ChatMessageFacadeService chatMessageFacadeService,
-            ChatMessageConverter chatMessageConverter
+            ChatMessageConverter chatMessageConverter,
+            RedisTemplate<String, Object> redisTemplate,
+            com.kama.jchatmind.service.MemorySummarizationService memorySummarizationService,
+            RagService ragService
     ) {
         this.chatClientRegistry = chatClientRegistry;
         this.sseService = sseService;
@@ -69,50 +78,17 @@ public class JChatMindFactory {
         this.toolFacadeService = toolFacadeService;
         this.chatMessageFacadeService = chatMessageFacadeService;
         this.chatMessageConverter = chatMessageConverter;
+        this.redisTemplate = redisTemplate;
+        this.memorySummarizationService = memorySummarizationService;
+        this.ragService = ragService;
     }
 
     private Agent loadAgent(String agentId) {
         return agentMapper.selectById(agentId);
     }
 
-    private List<Message> loadMemory(String chatSessionId, AgentDTO agentConfig) {
-        int messageLength = agentConfig.getChatOptions().getMessageLength();
-        List<ChatMessageDTO> chatMessages = chatMessageFacadeService.getChatMessagesBySessionIdRecently(chatSessionId, messageLength);
-        List<Message> memory = new ArrayList<>();
-        for (ChatMessageDTO chatMessageDTO : chatMessages) {
-            switch (chatMessageDTO.getRole()) {
-                case SYSTEM:
-                    if (!StringUtils.hasLength(chatMessageDTO.getContent())) continue;
-                    memory.add(0, new SystemMessage(chatMessageDTO.getContent()));
-                    break;
-                case USER:
-                    if (!StringUtils.hasLength(chatMessageDTO.getContent())) continue;
-                    memory.add(new UserMessage(chatMessageDTO.getContent()));
-                    break;
-                case ASSISTANT:
-                    memory.add(AssistantMessage.builder()
-                            .content(chatMessageDTO.getContent())
-                            .toolCalls(chatMessageDTO.getMetadata()
-                                    .getToolCalls()) 
-                            .build());
-                    break;
-                case TOOL:
-                    memory.add(ToolResponseMessage.builder()
-                            .responses(List.of(chatMessageDTO
-                                    .getMetadata()
-                                    .getToolResponse())) 
-                            .build());
-                    break;
-                default:
-                    log.error("不支持的 Message 类型: {}, content = {}",
-                            chatMessageDTO.getRole().getRole(),
-                            chatMessageDTO.getContent()
-                    );
-                    throw new IllegalStateException("不支持的 Message 类型");
-            }
-        }
-        return memory;
-    }
+    // 移除了原始的 loadMemory() 方法，交由 DistributedChatMemory 内部拉取
+
 
     private AgentDTO toAgentConfig(Agent agent) {
         try {
@@ -188,7 +164,11 @@ public class JChatMindFactory {
         Agent agent = loadAgent(agentId);
         AgentDTO agentConfig = toAgentConfig(agent); // 局部变量，解决并发问题
         
-        List<Message> memory = loadMemory(chatSessionId, agentConfig);
+        // 生成分布式共享缓存内存
+        int maxMessages = agentConfig.getChatOptions().getMessageLength();
+        ChatMemory chatMemory = new com.kama.jchatmind.agent.memory.DistributedChatMemory(
+                redisTemplate, chatMessageFacadeService, maxMessages);
+
         List<KnowledgeBaseDTO> knowledgeBases = resolveRuntimeKnowledgeBases(agentConfig);
         List<Tool> runtimeTools = resolveRuntimeTools(agentConfig);
         List<ToolCallback> toolCallbacks = buildToolCallbacks(runtimeTools);
@@ -203,13 +183,15 @@ public class JChatMindFactory {
                 agent.getName(),
                 agent.getDescription(),
                 agent.getSystemPrompt(),
-                agentConfig.getChatOptions().getMessageLength(),
-                memory,
+                chatMemory,
                 chatSessionId,
                 sseService,
                 chatMessageFacadeService,
                 chatMessageConverter,
-                null // GraphEngine将在下一步注入
+                null, // GraphEngine将在下一步注入
+                memorySummarizationService,
+                chatClient,
+                ragService
         );
         
         // 构造 GraphEngine
