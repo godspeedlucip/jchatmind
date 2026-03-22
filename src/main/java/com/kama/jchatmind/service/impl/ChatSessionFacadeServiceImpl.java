@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @AllArgsConstructor
@@ -80,24 +81,21 @@ public class ChatSessionFacadeServiceImpl implements ChatSessionFacadeService {
     @Override
     public CreateChatSessionResponse createChatSession(CreateChatSessionRequest request) {
         try {
-            // 将 CreateChatSessionRequest 转换为 ChatSessionDTO
             ChatSessionDTO chatSessionDTO = chatSessionConverter.toDTO(request);
-            
-            // 将 ChatSessionDTO 转换为 ChatSession 实体
             ChatSession chatSession = chatSessionConverter.toEntity(chatSessionDTO);
-            
-            // 设置创建时间和更新时间
+
+            // Avoid relying on JDBC generated-keys for PostgreSQL UUID columns.
+            chatSession.setId(UUID.randomUUID().toString());
+
             LocalDateTime now = LocalDateTime.now();
             chatSession.setCreatedAt(now);
             chatSession.setUpdatedAt(now);
-            
-            // 插入数据库，ID 由数据库自动生成
+
             int result = chatSessionMapper.insert(chatSession);
             if (result <= 0) {
                 throw new BizException("创建聊天会话失败");
             }
-            
-            // 返回生成的 chatSessionId
+
             return CreateChatSessionResponse.builder()
                     .chatSessionId(chatSession.getId())
                     .build();
@@ -112,7 +110,7 @@ public class ChatSessionFacadeServiceImpl implements ChatSessionFacadeService {
         if (chatSession == null) {
             throw new BizException("聊天会话不存在: " + chatSessionId);
         }
-        
+
         int result = chatSessionMapper.deleteById(chatSessionId);
         if (result <= 0) {
             throw new BizException("删除聊天会话失败");
@@ -122,28 +120,20 @@ public class ChatSessionFacadeServiceImpl implements ChatSessionFacadeService {
     @Override
     public void updateChatSession(String chatSessionId, UpdateChatSessionRequest request) {
         try {
-            // 查询现有的聊天会话
             ChatSession existingChatSession = chatSessionMapper.selectById(chatSessionId);
             if (existingChatSession == null) {
                 throw new BizException("聊天会话不存在: " + chatSessionId);
             }
-            
-            // 将现有 ChatSession 转换为 ChatSessionDTO
+
             ChatSessionDTO chatSessionDTO = chatSessionConverter.toDTO(existingChatSession);
-            
-            // 使用 UpdateChatSessionRequest 更新 ChatSessionDTO
             chatSessionConverter.updateDTOFromRequest(chatSessionDTO, request);
-            
-            // 将更新后的 ChatSessionDTO 转换回 ChatSession 实体
+
             ChatSession updatedChatSession = chatSessionConverter.toEntity(chatSessionDTO);
-            
-            // 保留原有的 ID、agentId 和创建时间
             updatedChatSession.setId(existingChatSession.getId());
             updatedChatSession.setAgentId(existingChatSession.getAgentId());
             updatedChatSession.setCreatedAt(existingChatSession.getCreatedAt());
             updatedChatSession.setUpdatedAt(LocalDateTime.now());
-            
-            // 更新数据库
+
             int result = chatSessionMapper.updateById(updatedChatSession);
             if (result <= 0) {
                 throw new BizException("更新聊天会话失败");

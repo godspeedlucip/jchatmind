@@ -18,7 +18,7 @@ public class ChatMessageController {
 
     // 根据 sessionId 查询聊天消息
     @GetMapping("/chat-messages/session/{sessionId}")
-    public ApiResponse<GetChatMessagesResponse> getChatMessagesBySessionId(@PathVariable String sessionId) {
+    public ApiResponse<GetChatMessagesResponse> getChatMessagesBySessionId(@PathVariable("sessionId") String sessionId) {
         return ApiResponse.success(chatMessageFacadeService.getChatMessagesBySessionId(sessionId));
     }
 
@@ -30,14 +30,14 @@ public class ChatMessageController {
 
     // 删除聊天消息
     @DeleteMapping("/chat-messages/{chatMessageId}")
-    public ApiResponse<Void> deleteChatMessage(@PathVariable String chatMessageId) {
+    public ApiResponse<Void> deleteChatMessage(@PathVariable("chatMessageId") String chatMessageId) {
         chatMessageFacadeService.deleteChatMessage(chatMessageId);
         return ApiResponse.success();
     }
 
     // 更新聊天消息
     @PatchMapping("/chat-messages/{chatMessageId}")
-    public ApiResponse<Void> updateChatMessage(@PathVariable String chatMessageId, @RequestBody UpdateChatMessageRequest request) {
+    public ApiResponse<Void> updateChatMessage(@PathVariable("chatMessageId") String chatMessageId, @RequestBody UpdateChatMessageRequest request) {
         chatMessageFacadeService.updateChatMessage(chatMessageId, request);
         return ApiResponse.success();
     }

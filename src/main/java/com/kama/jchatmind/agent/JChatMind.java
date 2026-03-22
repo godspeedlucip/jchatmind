@@ -113,8 +113,15 @@ public class JChatMind {
         ChatMessageDTO.ChatMessageDTOBuilder builder = ChatMessageDTO.builder();
         if (message instanceof AssistantMessage) {
             AssistantMessage assistantMessage = (AssistantMessage) message;
+            String text = assistantMessage.getText();
+            boolean hasToolCalls = assistantMessage.getToolCalls() != null
+                    && !assistantMessage.getToolCalls().isEmpty();
+            if ((text == null || text.trim().isEmpty()) && !hasToolCalls) {
+                log.debug("Skip persisting empty assistant message for session {}", this.chatSessionId);
+                return;
+            }
             ChatMessageDTO chatMessageDTO = builder.role(ChatMessageDTO.RoleType.ASSISTANT)
-                    .content(assistantMessage.getText())
+                    .content(text)
                     .sessionId(this.chatSessionId)
                     .metadata(ChatMessageDTO.MetaData.builder()
                             .toolCalls(assistantMessage.getToolCalls())
@@ -232,6 +239,16 @@ public class JChatMind {
             agentState = AgentState.ERROR;
             log.error("Error executing Agent Graph", e);
             throw new RuntimeException("Error executing Agent Graph", e);
+        } finally {
+            // Always notify frontend that this round has finished,
+            // so input can be re-enabled even when graph execution fails.
+            SseMessage doneMessage = SseMessage.builder()
+                    .type(SseMessage.Type.AI_DONE)
+                    .payload(SseMessage.Payload.builder()
+                            .done(Boolean.TRUE)
+                            .build())
+                    .build();
+            sseService.send(this.chatSessionId, doneMessage);
         }
     }
 

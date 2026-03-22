@@ -26,15 +26,20 @@ public class SupervisorNode implements AgentNode {
     @Override
     public AgentGraphState process(AgentGraphState state) {
         log.info("[GraphEngine] 节点执行: {}", getName());
-        
+
         String supervisorPrompt = """
-                你是一个高层任务调度主管 (Supervisor)。
-                你的直属下级为：
-                1. WORKER: 一个可以直接执行获取时间、邮件、知识库以及各种外部系统调用的全能机器人。
-                
-                请仔细分析用户的指令内容和当前的上下文：
-                1. 如果你发现用户在询问具体的天气、时间、文件信息、数据库信息或者你想帮他发邮件，或者你感觉需要最新的外部事实资料，请**坚决且只输出英文单词："WORKER"**，不要加任何其他字符，这会把它路由给下级工具人执行。
-                2. 如果你认为根据上下文已经得到了最终答案，或者仅仅是日常问候（如：你好，谢谢），不需要查任何外部工具，请综合上下文给用户最终的回答，并在你的回答末尾加上标记 "[FINISH]"。
+                You are the supervisor of a multi-agent system.
+
+                Your child worker is:
+                - WORKER: can call tools (time, weather, files, DB, external APIs, email, etc.).
+
+                Routing policy (strict):
+                1) If external facts/tools/actions are needed, output exactly: WORKER
+                2) If you can answer directly from current context, output the final answer and append [FINISH] at the end.
+
+                Important constraints:
+                - Do not output role introduction, meta-planning, or chain-of-thought.
+                - If uncertain about whether tools are needed, choose WORKER.
                 """;
 
         Prompt prompt = Prompt.builder()
@@ -49,23 +54,36 @@ public class SupervisorNode implements AgentNode {
                 .chatResponse();
 
         AssistantMessage output = response.getResult().getOutput();
-        String text = output.getText();
-        
-        if (text != null && text.contains("WORKER")) {
-            // 调度给 Worker，不需要保存这段内心独白给用户看
-            state.setNextNode("WORKER");
-        } else {
-            // 生成最终答案
-            String cleanText = text != null ? text.replace("[FINISH]", "").trim() : "";
+        String text = output.getText() != null ? output.getText().trim() : "";
+        String upper = text.toUpperCase();
+        String lower = text.toLowerCase();
+
+        boolean routeWorker = upper.equals("WORKER") || upper.contains("WORKER");
+        boolean hasFinishMarker = text.contains("[FINISH]");
+        boolean looksLikeMetaIntro =
+                lower.contains("supervisor")
+                        || text.contains("调度主管")
+                        || text.contains("高层任务调度")
+                        || text.contains("路由")
+                        || text.contains("WORKER:");
+
+        // Only finalize when explicitly marked as final answer.
+        if (hasFinishMarker && !routeWorker && !looksLikeMetaIntro) {
+            String cleanText = text.replace("[FINISH]", "").trim();
+            if (cleanText.isEmpty()) {
+                state.setNextNode("WORKER");
+                return state;
+            }
             AssistantMessage finalMsg = new AssistantMessage(cleanText);
-            
-            // 写入全局记忆
+
             state.getMessages().add(finalMsg);
-            // 通过属性抛出给外层引擎落盘
             state.getAttributes().put("latest_message", finalMsg);
-            
             state.setNextNode("FINISH");
+            return state;
         }
+
+        // Fallback to WORKER for all ambiguous outputs.
+        state.setNextNode("WORKER");
         return state;
     }
 }

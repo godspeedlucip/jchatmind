@@ -17,26 +17,23 @@ public class DocumentController {
 
     private final DocumentFacadeService documentFacadeService;
 
-    // 查询所有文档
-    @GetMapping("/documents")
+    // 查询所有文�?    @GetMapping("/documents")
     public ApiResponse<GetDocumentsResponse> getDocuments() {
         return ApiResponse.success(documentFacadeService.getDocuments());
     }
 
     // 根据 kbId 查询文档
     @GetMapping("/documents/kb/{kbId}")
-    public ApiResponse<GetDocumentsResponse> getDocumentsByKbId(@PathVariable String kbId) {
+    public ApiResponse<GetDocumentsResponse> getDocumentsByKbId(@PathVariable("kbId") String kbId) {
         return ApiResponse.success(documentFacadeService.getDocumentsByKbId(kbId));
     }
 
-    // 创建文档（仅创建记录，不上传文件）
-    @PostMapping("/documents")
+    // 创建文档（仅创建记录，不上传文件�?    @PostMapping("/documents")
     public ApiResponse<CreateDocumentResponse> createDocument(@RequestBody CreateDocumentRequest request) {
         return ApiResponse.success(documentFacadeService.createDocument(request));
     }
 
-    // 上传文档（上传文件并创建记录）
-    @PostMapping("/documents/upload")
+    // 上传文档（上传文件并创建记录�?    @PostMapping("/documents/upload")
     public ApiResponse<CreateDocumentResponse> uploadDocument(
             @RequestParam("kbId") String kbId,
             @RequestParam("file") MultipartFile file) {
@@ -45,14 +42,14 @@ public class DocumentController {
 
     // 删除文档
     @DeleteMapping("/documents/{documentId}")
-    public ApiResponse<Void> deleteDocument(@PathVariable String documentId) {
+    public ApiResponse<Void> deleteDocument(@PathVariable("documentId") String documentId) {
         documentFacadeService.deleteDocument(documentId);
         return ApiResponse.success();
     }
 
     // 更新文档
     @PatchMapping("/documents/{documentId}")
-    public ApiResponse<Void> updateDocument(@PathVariable String documentId, @RequestBody UpdateDocumentRequest request) {
+    public ApiResponse<Void> updateDocument(@PathVariable("documentId") String documentId, @RequestBody UpdateDocumentRequest request) {
         documentFacadeService.updateDocument(documentId, request);
         return ApiResponse.success();
     }

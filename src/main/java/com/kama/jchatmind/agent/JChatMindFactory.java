@@ -119,9 +119,19 @@ public class JChatMindFactory {
     }
 
     private List<Tool> resolveRuntimeTools(AgentDTO agentConfig) {
-        List<Tool> runtimeTools = new ArrayList<>(toolFacadeService.getFixedTools());
+        List<Tool> runtimeTools = new ArrayList<>();
+
+        // Do not expose internal loop-control tool to the LLM.
+        runtimeTools.addAll(
+                toolFacadeService.getFixedTools().stream()
+                        .filter(tool -> !"terminate".equalsIgnoreCase(tool.getName()))
+                        .toList()
+        );
+
         List<String> allowedToolNames = agentConfig.getAllowedTools();
         if (allowedToolNames == null || allowedToolNames.isEmpty()) {
+            // Empty means no restriction: enable all optional tools by default.
+            runtimeTools.addAll(toolFacadeService.getOptionalTools());
             return runtimeTools;
         }
         Map<String, Tool> optionalToolMap = toolFacadeService.getOptionalTools()

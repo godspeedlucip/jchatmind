@@ -39,7 +39,14 @@ public class WorkerNode implements AgentNode {
     public AgentGraphState process(AgentGraphState state) {
         log.info("[GraphEngine] 节点执行: {}", getName());
 
-        String workerPrompt = "你是一个专门操作工具的执行机器人 (Worker)。你的唯一目标是尽可能准确地使用注册好的外部工具来响应需求，千万不要自己瞎编。";
+        String workerPrompt = """
+                You are a worker that executes tasks with tools when needed.
+
+                Rules:
+                1) If a tool is needed, call the appropriate tool.
+                2) If no tool is needed, answer the user directly and clearly.
+                3) Never output meta-planning text.
+                """;
 
         Prompt prompt = Prompt.builder()
                 .chatOptions(this.chatOptions)
@@ -55,33 +62,51 @@ public class WorkerNode implements AgentNode {
 
         AssistantMessage output = response.getResult().getOutput();
         List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
+        String outputText = output.getText();
+        boolean hasMeaningfulText = outputText != null && !outputText.trim().isEmpty();
 
-        // 无论如何，要保存 Worker 大模型的直接返回信息（通常包含工具调用的申明）
+        // If no tool call is produced, treat worker output as final answer.
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            if (hasMeaningfulText) {
+                state.getMessages().add(output);
+                state.getAttributes().put("latest_message", output);
+                state.setNextNode("FINISH");
+            } else {
+                // Graceful fallback: never finish a round with empty visible text.
+                AssistantMessage fallback = new AssistantMessage("我没有生成有效回复，请换个问法再试一次。");
+                state.getMessages().add(fallback);
+                state.getAttributes().put("latest_message", fallback);
+                state.setNextNode("FINISH");
+            }
+            return state;
+        }
+
+        // Persist tool-call message and execute tools.
         state.getMessages().add(output);
         state.getAttributes().put("latest_tool_call_msg", output);
 
-        if (toolCalls != null && !toolCalls.isEmpty()) {
-            log.info("[GraphEngine] WORKER 决定执行工具...");
-            ToolExecutionResult executionResult = toolCallingManager.executeToolCalls(prompt, response);
+        log.info("[GraphEngine] WORKER 决定执行工具...");
+        ToolExecutionResult executionResult = toolCallingManager.executeToolCalls(prompt, response);
 
-            // 提取工具调用的结果（通常是会话历史的最后一条）
-            List<Message> history = executionResult.conversationHistory();
-            ToolResponseMessage toolResponseMsg = (ToolResponseMessage) history.get(history.size() - 1);
+        List<Message> history = executionResult.conversationHistory();
+        ToolResponseMessage toolResponseMsg = (ToolResponseMessage) history.get(history.size() - 1);
 
-            state.getMessages().add(toolResponseMsg);
-            state.getAttributes().put("latest_tool_response_msg", toolResponseMsg);
-            
-            String logMsg = toolResponseMsg.getResponses().stream()
+        state.getMessages().add(toolResponseMsg);
+        state.getAttributes().put("latest_tool_response_msg", toolResponseMsg);
+
+        String logMsg = toolResponseMsg.getResponses().stream()
                 .map(r -> r.name() + " -> " + r.responseData())
                 .collect(Collectors.joining(", "));
-            log.info("[GraphEngine] 工具执行完毕，结果: {}", logMsg);
+        log.info("[GraphEngine] 工具执行完毕，结果: {}", logMsg);
 
-        } else {
-             log.warn("[GraphEngine] WORKER 没有产生任何工具调用!");
-        }
-
-        // 把执行后的上下文再次送入给 Supervisor，让大脑判断还需要不需要继续做什么，或者是否得到了最终答案
-        state.setNextNode("SUPERVISOR");
+        // Build a direct final answer from tool results to avoid extra routing loops.
+        String finalText = toolResponseMsg.getResponses().stream()
+                .map(ToolResponseMessage.ToolResponse::responseData)
+                .collect(Collectors.joining("\n"));
+        AssistantMessage finalMsg = new AssistantMessage(finalText);
+        state.getMessages().add(finalMsg);
+        state.getAttributes().put("latest_message", finalMsg);
+        state.setNextNode("FINISH");
         return state;
     }
 }

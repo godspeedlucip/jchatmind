@@ -77,10 +77,20 @@
                metadata::text AS metadata,
                created_at,
                updated_at
-        FROM chat_message
-        WHERE session_id = CAST(#{sessionId} AS uuid)
-        ORDER BY created_at
-        LIMIT #{limit}
+        FROM (
+            SELECT id,
+                   session_id,
+                   role,
+                   content,
+                   metadata,
+                   created_at,
+                   updated_at
+            FROM chat_message
+            WHERE session_id = CAST(#{sessionId} AS uuid)
+            ORDER BY created_at DESC
+            LIMIT #{limit}
+        ) t
+        ORDER BY created_at ASC
     </select>
 
     <delete id="deleteById">

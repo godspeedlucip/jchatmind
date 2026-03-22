@@ -30,14 +30,14 @@ public class AgentController {
 
     // 删除 agent
     @DeleteMapping("/agents/{agentId}")
-    public ApiResponse<Void> deleteAgent(@PathVariable String agentId) {
+    public ApiResponse<Void> deleteAgent(@PathVariable("agentId") String agentId) {
         agentFacadeService.deleteAgent(agentId);
         return ApiResponse.success();
     }
 
     // 更新 agent
     @PatchMapping("/agents/{agentId}")
-    public ApiResponse<Void> updateAgent(@PathVariable String agentId, @RequestBody UpdateAgentRequest request) {
+    public ApiResponse<Void> updateAgent(@PathVariable("agentId") String agentId, @RequestBody UpdateAgentRequest request) {
         agentFacadeService.updateAgent(agentId, request);
         return ApiResponse.success();
     }

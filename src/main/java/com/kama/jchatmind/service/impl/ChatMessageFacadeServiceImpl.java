@@ -15,6 +15,7 @@ import com.kama.jchatmind.model.vo.ChatMessageVO;
 import com.kama.jchatmind.service.ChatMessageFacadeService;
 import lombok.AllArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -25,9 +26,12 @@ import java.util.List;
 @AllArgsConstructor
 public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
 
+    private static final String CHAT_MEMORY_KEY_PREFIX = "chat:memory:";
+
     private final ChatMessageMapper chatMessageMapper;
     private final ChatMessageConverter chatMessageConverter;
     private final ApplicationEventPublisher publisher;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     @Override
     public GetChatMessagesResponse getChatMessagesBySessionId(String sessionId) {
@@ -66,14 +70,18 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
     @Override
     public CreateChatMessageResponse createChatMessage(CreateChatMessageRequest request) {
         ChatMessage chatMessage = doCreateChatMessage(request);
-        // 发布聊天通知事件
+
+        // Ensure next run reads latest user input from DB instead of stale Redis cache.
+        if (request.getRole() == ChatMessageDTO.RoleType.USER) {
+            redisTemplate.delete(CHAT_MEMORY_KEY_PREFIX + request.getSessionId());
+        }
+
         publisher.publishEvent(new ChatEvent(
-                        request.getAgentId(),
-                        chatMessage.getSessionId(),
-                        chatMessage.getContent()
-                )
-        );
-        // 返回生成的 chatMessageId
+                request.getAgentId(),
+                chatMessage.getSessionId(),
+                chatMessage.getContent()
+        ));
+
         return CreateChatMessageResponse.builder()
                 .chatMessageId(chatMessage.getId())
                 .build();
@@ -90,29 +98,25 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
     @Override
     public CreateChatMessageResponse agentCreateChatMessage(CreateChatMessageRequest request) {
         ChatMessage chatMessage = doCreateChatMessage(request);
-        // 和 createChatMessage 的区别在于，Agent 创建的 chatMessage 不需要发布事件
+        // Agent-created messages should not trigger chat event.
         return CreateChatMessageResponse.builder()
                 .chatMessageId(chatMessage.getId())
                 .build();
     }
 
     private ChatMessage doCreateChatMessage(CreateChatMessageRequest request) {
-        // 将 CreateChatMessageRequest 转换为 ChatMessageDTO
         ChatMessageDTO chatMessageDTO = chatMessageConverter.toDTO(request);
-        // 将 ChatMessageDTO 转换为 ChatMessage 实体
         return doCreateChatMessage(chatMessageDTO);
     }
 
     private ChatMessage doCreateChatMessage(ChatMessageDTO chatMessageDTO) {
         try {
-            // 将 ChatMessageDTO 转换为 ChatMessage 实体
             ChatMessage chatMessage = chatMessageConverter.toEntity(chatMessageDTO);
 
-            // 设置创建时间和更新时间
             LocalDateTime now = LocalDateTime.now();
             chatMessage.setCreatedAt(now);
             chatMessage.setUpdatedAt(now);
-            // 插入数据库，ID 由数据库自动生成
+
             int result = chatMessageMapper.insert(chatMessage);
             if (result <= 0) {
                 throw new BizException("创建聊天消息失败");
@@ -125,19 +129,16 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
 
     @Override
     public CreateChatMessageResponse appendChatMessage(String chatMessageId, String appendContent) {
-        // 查询现有的聊天消息
         ChatMessage existingChatMessage = chatMessageMapper.selectById(chatMessageId);
         if (existingChatMessage == null) {
             throw new BizException("聊天消息不存在: " + chatMessageId);
         }
 
-        // 将追加内容添加到现有内容后面
         String currentContent = existingChatMessage.getContent() != null
                 ? existingChatMessage.getContent()
                 : "";
         String updatedContent = currentContent + appendContent;
 
-        // 创建更新后的消息对象
         ChatMessage updatedChatMessage = ChatMessage.builder()
                 .id(existingChatMessage.getId())
                 .sessionId(existingChatMessage.getSessionId())
@@ -148,13 +149,11 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
                 .updatedAt(LocalDateTime.now())
                 .build();
 
-        // 更新数据库
         int result = chatMessageMapper.updateById(updatedChatMessage);
         if (result <= 0) {
             throw new BizException("追加聊天消息内容失败");
         }
 
-        // 返回聊天消息ID
         return CreateChatMessageResponse.builder()
                 .chatMessageId(chatMessageId)
                 .build();
@@ -176,29 +175,21 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
     @Override
     public void updateChatMessage(String chatMessageId, UpdateChatMessageRequest request) {
         try {
-            // 查询现有的聊天消息
             ChatMessage existingChatMessage = chatMessageMapper.selectById(chatMessageId);
             if (existingChatMessage == null) {
                 throw new BizException("聊天消息不存在: " + chatMessageId);
             }
 
-            // 将现有 ChatMessage 转换为 ChatMessageDTO
             ChatMessageDTO chatMessageDTO = chatMessageConverter.toDTO(existingChatMessage);
-
-            // 使用 UpdateChatMessageRequest 更新 ChatMessageDTO
             chatMessageConverter.updateDTOFromRequest(chatMessageDTO, request);
 
-            // 将更新后的 ChatMessageDTO 转换回 ChatMessage 实体
             ChatMessage updatedChatMessage = chatMessageConverter.toEntity(chatMessageDTO);
-
-            // 保留原有的 ID、sessionId、role 和创建时间
             updatedChatMessage.setId(existingChatMessage.getId());
             updatedChatMessage.setSessionId(existingChatMessage.getSessionId());
             updatedChatMessage.setRole(existingChatMessage.getRole());
             updatedChatMessage.setCreatedAt(existingChatMessage.getCreatedAt());
             updatedChatMessage.setUpdatedAt(LocalDateTime.now());
 
-            // 更新数据库
             int result = chatMessageMapper.updateById(updatedChatMessage);
             if (result <= 0) {
                 throw new BizException("更新聊天消息失败");
@@ -208,4 +199,3 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
         }
     }
 }
-

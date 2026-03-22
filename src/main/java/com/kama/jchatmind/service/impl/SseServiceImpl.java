@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kama.jchatmind.message.SseMessage;
 import com.kama.jchatmind.service.SseService;
 import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -13,6 +14,7 @@ import java.util.concurrent.ConcurrentMap;
 
 @Service
 @AllArgsConstructor
+@Slf4j
 public class SseServiceImpl implements SseService {
 
     private final ConcurrentMap<String, SseEmitter> clients = new ConcurrentHashMap<>();
@@ -29,13 +31,11 @@ public class SseServiceImpl implements SseService {
                     .data("connected")
             );
         } catch (IOException e) {
+            clients.remove(chatSessionId);
             throw new RuntimeException(e);
         }
 
-        // å½“ SSE è¯·æ±‚æ­£å¸¸å®Œæˆæ—¶ï¼ŒæŠŠè¿™ä¸ªè¿æ¥ä» clients ä¸­åˆ é™¤ã€‚
-        emitter.onCompletion(() -> {
-            clients.remove(chatSessionId);
-        });
+        emitter.onCompletion(() -> clients.remove(chatSessionId));
         emitter.onTimeout(() -> clients.remove(chatSessionId));
         emitter.onError((error) -> clients.remove(chatSessionId));
 
@@ -44,23 +44,25 @@ public class SseServiceImpl implements SseService {
 
     @Override
     public void send(String chatSessionId, SseMessage message) {
-        // æ ¹æ®ä¼šè¯ ID æ‰¾è¿æ¥
         SseEmitter emitter = clients.get(chatSessionId);
 
-        if (emitter != null) {
-            try {
-                // å°†æ¶ˆæ¯è½¬æ¢ä¸ºå­—ç¬¦ä¸² (è¿™æ˜¯ä¸ºäº†æŠŠ Java å¯¹è±¡å˜æˆå­—ç¬¦ä¸²ã€‚)
-                String sseMessageStr = objectMapper.writeValueAsString(message);
-                // å‘é€ä¸€ä¸ªåä¸º message çš„äº‹ä»¶
-                emitter.send(SseEmitter.event()
-                        .name("message")
-                        .data(sseMessageStr)
-                );
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        } else {
-            throw new RuntimeException("No client found for chatSessionId: " + chatSessionId);
+        if (emitter == null) {
+            // Ç°¶Ë¿ÉÄÜÉĞÎ´½¨Á¢ SSE£¬²»ÄÜÒò´ËÖĞ¶Ï Agent Ö÷Á÷³Ì
+            log.warn("No SSE client found for chatSessionId={}, skip push", chatSessionId);
+            return;
+        }
+
+        try {
+            String sseMessageStr = objectMapper.writeValueAsString(message);
+            emitter.send(SseEmitter.event()
+                    .name("message")
+                    .data(sseMessageStr)
+            );
+        } catch (IOException e) {
+            // Á¬½Ó¶Ï¿ªÊ±ÒÆ³ı¿Í»§¶Ë£¬±ÜÃâºóĞøÖØ¸´±¨´í
+            clients.remove(chatSessionId);
+            log.warn("Failed to send SSE message, removed client, chatSessionId={}, error={}",
+                    chatSessionId, e.getMessage());
         }
     }
 }

@@ -17,7 +17,7 @@ public class SseController {
 
     // 处理 sse 连接
     @RequestMapping(value = "/connect/{chatSessionId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter connect(@PathVariable String chatSessionId) {
+    public SseEmitter connect(@PathVariable("chatSessionId") String chatSessionId) {
         return sseService.connect(chatSessionId);
     }
 }

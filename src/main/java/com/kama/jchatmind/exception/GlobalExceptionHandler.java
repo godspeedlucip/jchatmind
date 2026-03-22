@@ -2,7 +2,9 @@ package com.kama.jchatmind.exception;
 
 import com.kama.jchatmind.model.common.ApiResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -10,28 +12,27 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
-    /**
-     * æ•è·ä¸šåŠ¡å¼‚å¸¸ï¼Œé”™è¯¯ä¿¡æ¯è¿”å›ç»™å‰ç«¯
-     */
+
     @ExceptionHandler(BizException.class)
     public ApiResponse<Void> handleBizException(BizException e) {
         return ApiResponse.error(e.getMessage());
     }
 
-    /**
-     * å¤„ç† 404 é”™è¯¯
-     */
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<?> handle404(NoResourceFoundException e) {
         return ResponseEntity.notFound().build();
     }
 
-    /**
-     * æ•è·æ‰€æœ‰æœªå¤„ç†çš„å¼‚å¸¸, å¯¹å‰ç«¯ä¸è¿”å›é”™è¯¯ä¿¡æ¯
-     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleMethodNotSupported(HttpRequestMethodNotSupportedException e) {
+        log.warn("HTTP method not supported: method={}, message={}", e.getMethod(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(ApiResponse.error("ÇëÇó·½·¨²»Ö§³Ö: " + e.getMethod()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ApiResponse<Void> handleException(Exception e) {
-        log.error("æœåŠ¡å™¨å†…éƒ¨é”™è¯¯", e);
-        return ApiResponse.error("æœåŠ¡å™¨å†…éƒ¨é”™è¯¯");
+        log.error("·şÎñÆ÷ÄÚ²¿´íÎó", e);
+        return ApiResponse.error("·şÎñÆ÷ÄÚ²¿´íÎó");
     }
 }

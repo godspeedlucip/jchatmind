@@ -22,22 +22,19 @@ public class KnowledgeBaseController {
         return ApiResponse.success(knowledgeBaseFacadeService.getKnowledgeBases());
     }
 
-    // 创建知识库
-    @PostMapping("/knowledge-bases")
+    // 创建知识�?    @PostMapping("/knowledge-bases")
     public ApiResponse<CreateKnowledgeBaseResponse> createKnowledgeBase(@RequestBody CreateKnowledgeBaseRequest request) {
         return ApiResponse.success(knowledgeBaseFacadeService.createKnowledgeBase(request));
     }
 
-    // 删除知识库
-    @DeleteMapping("/knowledge-bases/{knowledgeBaseId}")
-    public ApiResponse<Void> deleteKnowledgeBase(@PathVariable String knowledgeBaseId) {
+    // 删除知识�?    @DeleteMapping("/knowledge-bases/{knowledgeBaseId}")
+    public ApiResponse<Void> deleteKnowledgeBase(@PathVariable("knowledgeBaseId") String knowledgeBaseId) {
         knowledgeBaseFacadeService.deleteKnowledgeBase(knowledgeBaseId);
         return ApiResponse.success();
     }
 
-    // 更新知识库
-    @PatchMapping("/knowledge-bases/{knowledgeBaseId}")
-    public ApiResponse<Void> updateKnowledgeBase(@PathVariable String knowledgeBaseId, @RequestBody UpdateKnowledgeBaseRequest request) {
+    // 更新知识�?    @PatchMapping("/knowledge-bases/{knowledgeBaseId}")
+    public ApiResponse<Void> updateKnowledgeBase(@PathVariable("knowledgeBaseId") String knowledgeBaseId, @RequestBody UpdateKnowledgeBaseRequest request) {
         knowledgeBaseFacadeService.updateKnowledgeBase(knowledgeBaseId, request);
         return ApiResponse.success();
     }

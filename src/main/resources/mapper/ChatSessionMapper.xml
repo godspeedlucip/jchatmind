@@ -18,10 +18,10 @@
         metadata,created_at,updated_at
     </sql>
 
-    <insert id="insert" parameterType="com.kama.jchatmind.model.entity.ChatSession"
-            keyColumn="id" keyProperty="id" useGeneratedKeys="true">
+    <insert id="insert" parameterType="com.kama.jchatmind.model.entity.ChatSession">
         INSERT INTO chat_session
         (
+            id,
             agent_id,
             title,
             metadata,
@@ -30,6 +30,7 @@
         )
         VALUES
             (
+                CAST(#{id} AS uuid),
                 CAST(#{agentId} AS uuid),
                 #{title},
                 CAST(#{metadata} AS jsonb),
