@@ -33,6 +33,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.util.*;
+import java.lang.reflect.Method;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -53,7 +54,7 @@ public class JChatMindFactory {
     private final com.kama.jchatmind.service.MemorySummarizationService memorySummarizationService;
     private final RagService ragService;
 
-    // 修复了严重的并发级别 BUG：删除了原本的成员变量 private AgentDTO agentConfig;
+    // 娣囶喖顦叉禍鍡曞紬闁插秶娈戦獮璺哄絺缁狙冨焼 BUG閿涙艾鍨归梽銈勭啊閸樼喐婀伴惃鍕灇閸涙ê褰夐柌?private AgentDTO agentConfig;
 
     public JChatMindFactory(
             ChatClientRegistry chatClientRegistry,
@@ -87,14 +88,14 @@ public class JChatMindFactory {
         return agentMapper.selectById(agentId);
     }
 
-    // 移除了原始的 loadMemory() 方法，交由 DistributedChatMemory 内部拉取
+    // 缁夊娅庢禍鍡楀斧婵娈?loadMemory() 閺傝纭堕敍灞兼唉閻?DistributedChatMemory 閸愬懘鍎撮幏澶婂絿
 
 
     private AgentDTO toAgentConfig(Agent agent) {
         try {
             return agentConverter.toDTO(agent);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("解析 Agent 配置失败", e);
+            throw new IllegalStateException("鐟欙絾鐎?Agent 闁板秶鐤嗘径杈Е", e);
         }
     }
 
@@ -160,21 +161,49 @@ public class JChatMindFactory {
         return callbacks;
     }
 
-    private Object resolveToolTarget(Tool tool) {
+    private Set<String> resolveAvailableToolNames(List<Tool> runtimeTools) {
+        Set<String> names = new LinkedHashSet<>();
+        for (Tool tool : runtimeTools) {
+            if (tool.getName() != null && !tool.getName().isBlank()) {
+                names.add(tool.getName());
+            }
+
+            Class<?> targetClass = resolveToolClass(tool);
+            for (Method method : targetClass.getMethods()) {
+                org.springframework.ai.tool.annotation.Tool annotation =
+                        method.getAnnotation(org.springframework.ai.tool.annotation.Tool.class);
+                if (annotation == null) {
+                    continue;
+                }
+                String declaredName = annotation.name();
+                if (declaredName != null && !declaredName.isBlank()) {
+                    names.add(declaredName);
+                } else {
+                    names.add(method.getName());
+                }
+            }
+        }
+        return names;
+    }
+
+    private Class<?> resolveToolClass(Tool tool) {
         try {
             return AopUtils.isAopProxy(tool)
                     ? AopUtils.getTargetClass(tool)
-                    : tool;
+                    : tool.getClass();
         } catch (Exception e) {
-            throw new IllegalStateException("解析工具目标对象失败: " + tool.getName(), e);
+            return tool.getClass();
         }
     }
 
-    public JChatMind create(String agentId, String chatSessionId) {
+    private Object resolveToolTarget(Tool tool) {
+        return tool;
+    }
+
+        public JChatMind create(String agentId, String chatSessionId) {
         Agent agent = loadAgent(agentId);
-        AgentDTO agentConfig = toAgentConfig(agent); // 局部变量，解决并发问题
-        
-        // 生成分布式共享缓存内存
+        AgentDTO agentConfig = toAgentConfig(agent);
+
         int maxMessages = agentConfig.getChatOptions().getMessageLength();
         ChatMemory chatMemory = new com.kama.jchatmind.agent.memory.DistributedChatMemory(
                 redisTemplate, chatMessageFacadeService, maxMessages);
@@ -182,10 +211,11 @@ public class JChatMindFactory {
         List<KnowledgeBaseDTO> knowledgeBases = resolveRuntimeKnowledgeBases(agentConfig);
         List<Tool> runtimeTools = resolveRuntimeTools(agentConfig);
         List<ToolCallback> toolCallbacks = buildToolCallbacks(runtimeTools);
+        Set<String> availableToolNames = resolveAvailableToolNames(runtimeTools);
 
         ChatClient chatClient = chatClientRegistry.get(agent.getModel());
         if (Objects.isNull(chatClient)) {
-            throw new IllegalStateException("未找到对应的 ChatClient: " + agent.getModel());
+            throw new IllegalStateException("Cannot find ChatClient for model: " + agent.getModel());
         }
 
         JChatMind jChatMind = new JChatMind(
@@ -198,28 +228,28 @@ public class JChatMindFactory {
                 sseService,
                 chatMessageFacadeService,
                 chatMessageConverter,
-                null, // GraphEngine将在下一步注入
+                null,
                 memorySummarizationService,
                 chatClient,
                 ragService
         );
-        
-        // 构造 GraphEngine
-        // 关闭 Spring AI 原生的自动调工具逻辑，改由我们的 GraphEngine 控制
-        org.springframework.ai.chat.prompt.ChatOptions chatOptions = 
-            org.springframework.ai.model.tool.DefaultToolCallingChatOptions.builder()
-            .internalToolExecutionEnabled(false)
-            .build();
-            
-        SupervisorNode supervisorNode = new SupervisorNode(chatClient, chatOptions);
-        WorkerNode workerNode = new WorkerNode(chatClient, chatOptions, toolCallbacks);
+
+        org.springframework.ai.chat.prompt.ChatOptions chatOptions =
+                org.springframework.ai.model.tool.DefaultToolCallingChatOptions.builder()
+                        .internalToolExecutionEnabled(false)
+                        .build();
+
+        SupervisorNode supervisorNode = new SupervisorNode(chatClient, chatOptions, availableToolNames);
+        WorkerNode workerNode = new WorkerNode(chatClient, chatOptions, toolCallbacks, availableToolNames);
 
         GraphEngine engine = new GraphEngine("SUPERVISOR", jChatMind::handleGeneratedMessage);
         engine.addNode(supervisorNode);
         engine.addNode(workerNode);
-        
+
         jChatMind.setGraphEngine(engine);
 
         return jChatMind;
     }
 }
+
+

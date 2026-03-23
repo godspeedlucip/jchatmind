@@ -120,8 +120,10 @@ public class JChatMind {
                 log.debug("Skip persisting empty assistant message for session {}", this.chatSessionId);
                 return;
             }
+            // Hide worker planning text when this message is actually a tool-call carrier.
+            String persistedContent = hasToolCalls ? "" : text;
             ChatMessageDTO chatMessageDTO = builder.role(ChatMessageDTO.RoleType.ASSISTANT)
-                    .content(text)
+                    .content(persistedContent)
                     .sessionId(this.chatSessionId)
                     .metadata(ChatMessageDTO.MetaData.builder()
                             .toolCalls(assistantMessage.getToolCalls())
@@ -199,6 +201,8 @@ public class JChatMind {
                 memoryMessages.add(0, new SystemMessage(enhancedSystemPrompt));
             }
             state.setMessages(memoryMessages);
+            // Mark this turn start index so graph nodes can ignore previous-turn tool states.
+            state.getAttributes().put("turn_start_message_count", memoryMessages.size());
 
             // 启动 Supervisor-Worker 图流转
             if (graphEngine != null) {

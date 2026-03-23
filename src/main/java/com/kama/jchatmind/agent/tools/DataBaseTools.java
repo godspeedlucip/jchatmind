@@ -1,6 +1,8 @@
 package com.kama.jchatmind.agent.tools;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -8,10 +10,19 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 @Slf4j
-public class DataBaseTools implements Tool {
+public class DataBaseTools implements com.kama.jchatmind.agent.tools.Tool {
+
+    private static final Pattern MISSING_RELATION_PATTERN =
+            Pattern.compile("relation\\s+\"([^\"]+)\"\\s+does\\s+not\\s+exist", Pattern.CASE_INSENSITIVE);
+
+    private static final String LIST_TABLE_SQL =
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name";
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -26,7 +37,7 @@ public class DataBaseTools implements Tool {
 
     @Override
     public String getDescription() {
-        return "一个用于执行数据库查询操作的工具，主要用于从 PostgreSQL 中读取数据。";
+        return "用于在 PostgreSQL 中执行只读查询（SELECT），并返回结构化结果。";
     }
 
     @Override
@@ -34,42 +45,28 @@ public class DataBaseTools implements Tool {
         return ToolType.OPTIONAL;
     }
 
-    /**
-     * 执行一条 SQL 查询，从数据库中进行查询数据
-     *
-     * @param sql SQL 查询语句（仅支持 SELECT 查询）
-     * @return 格式化的查询结果字符串
-     */
-    /**
-     * 返回的数据格式示例（是一个CLI 表格字符串）
-    | id | name | age |
-    |----|------|-----|
-    | 1  | Tom  | 20  |
-    | 2  | Lucy | 18  |
-    */
-    @org.springframework.ai.tool.annotation.Tool(name = "databaseQuery", description = "用于在 PostgreSQL 中执行只读查询（SELECT）。接收由模型生成的查询语句，并返回结构化数据结果。该工具仅用于检索数据，严禁任何写入或修改数据库的语句。")
+    @Tool(
+            name = "databaseQuery",
+            description = "在 PostgreSQL 中执行只读查询（仅 SELECT）。禁止 INSERT/UPDATE/DELETE/DDL。"
+    )
     public String query(String sql) {
         try {
-            // 验证 SQL 语句安全性（只允许 SELECT 查询）
-            String trimmedSql = sql.trim().toUpperCase();
-            if (!trimmedSql.startsWith("SELECT")) {
-                log.warn("拒绝执行非 SELECT 查询: {}", sql);
-                return "错误：仅支持 SELECT 查询语句。提供的 SQL: " + sql;
+            String trimmed = sql == null ? "" : sql.trim();
+            String upper = trimmed.toUpperCase(Locale.ROOT);
+            if (!upper.startsWith("SELECT")) {
+                log.warn("Rejected non-SELECT SQL: {}", sql);
+                return "仅允许执行 SELECT 查询。\nSQL: " + sql;
             }
 
-            // 执行查询
-            List<String> rows = jdbcTemplate.query(sql, (ResultSet rs) -> {
-                // 要对查询得到的ResultSer进行什么处理
+            List<String> rows = jdbcTemplate.query(trimmed, (ResultSet rs) -> {
                 List<String> resultRows = new ArrayList<>();
                 ResultSetMetaData metaData = rs.getMetaData();
                 int columnCount = metaData.getColumnCount();
 
                 if (columnCount == 0) {
-                    resultRows.add("查询结果为空（无列）");
-                    return resultRows;
+                    return List.of("查询成功，但没有可显示的列。");
                 }
 
-                // 获取列名和计算每列的最大宽度
                 List<String> columnNames = new ArrayList<>();
                 List<Integer> columnWidths = new ArrayList<>();
                 for (int i = 1; i <= columnCount; i++) {
@@ -78,7 +75,6 @@ public class DataBaseTools implements Tool {
                     columnWidths.add(columnName.length());
                 }
 
-                // 收集所有行数据并计算列宽
                 List<List<String>> dataRows = new ArrayList<>();
                 while (rs.next()) {
                     List<String> rowData = new ArrayList<>();
@@ -86,50 +82,33 @@ public class DataBaseTools implements Tool {
                         Object value = rs.getObject(i);
                         String valueStr = value == null ? "NULL" : value.toString();
                         rowData.add(valueStr);
-                        // 更新列宽
-                        int currentWidth = columnWidths.get(i - 1);
-                        if (valueStr.length() > currentWidth) {
+                        if (valueStr.length() > columnWidths.get(i - 1)) {
                             columnWidths.set(i - 1, valueStr.length());
                         }
                     }
                     dataRows.add(rowData);
                 }
 
-                // 格式化表头
-                StringBuilder header = new StringBuilder();
-                header.append("| ");
+                StringBuilder header = new StringBuilder("| ");
                 for (int i = 0; i < columnCount; i++) {
-                    String columnName = columnNames.get(i);
-                    int width = columnWidths.get(i);
-                    header.append(String.format("%-" + width + "s", columnName)).append(" | ");
+                    header.append(String.format("%-" + columnWidths.get(i) + "s", columnNames.get(i))).append(" | ");
                 }
                 resultRows.add(header.toString());
 
-                // 添加分隔线
-                StringBuilder separator = new StringBuilder();
-                separator.append("|");
+                StringBuilder separator = new StringBuilder("|");
                 for (int i = 0; i < columnCount; i++) {
-                    int width = columnWidths.get(i);
-                    separator.append("-".repeat(width + 2)).append("|");
+                    separator.append("-".repeat(columnWidths.get(i) + 2)).append("|");
                 }
                 resultRows.add(separator.toString());
 
-                // 格式化数据行
                 if (dataRows.isEmpty()) {
-                    StringBuilder emptyRow = new StringBuilder();
-                    emptyRow.append("| ");
                     int totalWidth = columnWidths.stream().mapToInt(w -> w + 3).sum() - 1;
-                    emptyRow.append(String.format("%-" + (totalWidth - 2) + "s", "(无数据)"));
-                    emptyRow.append(" |");
-                    resultRows.add(emptyRow.toString());
+                    resultRows.add("| " + String.format("%-" + Math.max(totalWidth - 2, 1) + "s", "(无数据)") + " |");
                 } else {
                     for (List<String> rowData : dataRows) {
-                        StringBuilder row = new StringBuilder();
-                        row.append("| ");
+                        StringBuilder row = new StringBuilder("| ");
                         for (int i = 0; i < columnCount; i++) {
-                            String value = rowData.get(i);
-                            int width = columnWidths.get(i);
-                            row.append(String.format("%-" + width + "s", value)).append(" | ");
+                            row.append(String.format("%-" + columnWidths.get(i) + "s", rowData.get(i))).append(" | ");
                         }
                         resultRows.add(row.toString());
                     }
@@ -138,17 +117,54 @@ public class DataBaseTools implements Tool {
                 return resultRows;
             });
 
-            int dataRowCount = rows.size() - 2; // 减去表头和分隔线
-            if (rows.size() > 2 && rows.get(rows.size() - 1).contains("(无数据)")) {
-                dataRowCount = 0;
-            }
-
-            log.info("成功执行 SQL 查询，返回 {} 行数据", dataRowCount);
-            // 将结果格式化为字符串
             return "查询结果:\n" + String.join("\n", rows);
+        } catch (BadSqlGrammarException e) {
+            String rootMessage = extractRootMessage(e);
+            String lower = rootMessage.toLowerCase(Locale.ROOT);
+            if (lower.contains("relation") && lower.contains("does not exist")) {
+                String missingTable = extractMissingRelationName(rootMessage);
+                List<String> tables = listPublicTables();
+                String tableList = tables.isEmpty() ? "(未获取到表清单)" : String.join(", ", tables);
+                return "SQL 执行失败：表 "
+                        + (missingTable.isEmpty() ? "(未知)" : ("'" + missingTable + "'"))
+                        + " 不存在。\n"
+                        + "请改用已存在的表后重试。\n"
+                        + "当前 public schema 表：" + tableList + "\n"
+                        + "建议先执行：" + LIST_TABLE_SQL;
+            }
+            log.error("SQL grammar error: {}", rootMessage, e);
+            return "SQL 语法错误：" + rootMessage + "\nSQL: " + sql;
         } catch (Exception e) {
-            log.error("未知错误: {}", e.getMessage(), e);
-            return "错误：操作失败 - " + e.getMessage() + "\nSQL: " + sql;
+            log.error("Database query failed", e);
+            return "数据库查询失败：" + extractRootMessage(e) + "\nSQL: " + sql;
+        }
+    }
+
+    private String extractRootMessage(Throwable throwable) {
+        Throwable cursor = throwable;
+        while (cursor.getCause() != null) {
+            cursor = cursor.getCause();
+        }
+        if (cursor.getMessage() != null && !cursor.getMessage().isBlank()) {
+            return cursor.getMessage();
+        }
+        return throwable.getMessage() == null ? "未知错误" : throwable.getMessage();
+    }
+
+    private String extractMissingRelationName(String message) {
+        Matcher matcher = MISSING_RELATION_PATTERN.matcher(message);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private List<String> listPublicTables() {
+        try {
+            return jdbcTemplate.queryForList(LIST_TABLE_SQL, String.class)
+                    .stream()
+                    .limit(100)
+                    .toList();
+        } catch (Exception e) {
+            log.warn("Failed to list tables from information_schema: {}", e.getMessage());
+            return List.of();
         }
     }
 }

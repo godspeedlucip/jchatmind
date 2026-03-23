@@ -13,20 +13,31 @@ import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
 public class WorkerNode implements AgentNode {
 
+    private static final Pattern INVOKE_NAME_PATTERN = Pattern.compile("name\\s*=\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
+
     private final ChatClient chatClient;
     private final ChatOptions chatOptions;
     private final List<ToolCallback> tools;
     private final ToolCallingManager toolCallingManager;
+    private final Set<String> availableToolNames;
 
-    public WorkerNode(ChatClient chatClient, ChatOptions chatOptions, List<ToolCallback> tools) {
+    public WorkerNode(ChatClient chatClient,
+                      ChatOptions chatOptions,
+                      List<ToolCallback> tools,
+                      Set<String> availableToolNames) {
         this.chatClient = chatClient;
         this.chatOptions = chatOptions;
         this.tools = tools;
+        this.availableToolNames = availableToolNames;
         this.toolCallingManager = ToolCallingManager.builder().build();
     }
 
@@ -37,19 +48,32 @@ public class WorkerNode implements AgentNode {
 
     @Override
     public AgentGraphState process(AgentGraphState state) {
-        log.info("[GraphEngine] 节点执行: {}", getName());
+        log.info("[GraphEngine] Node: {}", getName());
+
+        state.getAttributes().put("tool_failed", false);
+        state.getAttributes().remove("last_tool_error");
+        state.getAttributes().remove("worker_candidate_answer");
+
+        String toolNames = availableToolNames == null || availableToolNames.isEmpty()
+                ? "(none)"
+                : String.join(", ", availableToolNames);
 
         String workerPrompt = """
-                You are a worker that executes tasks with tools when needed.
+                You are a worker node.
+
+                Available tool names (exact): %s
 
                 Rules:
-                1) If a tool is needed, call the appropriate tool.
-                2) If no tool is needed, answer the user directly and clearly.
-                3) Never output meta-planning text.
-                """;
+                1) Call tools when needed.
+                2) If no tool is needed, provide plain text only.
+                3) Never output DSML/XML/function-call markup in text.
+                4) Never invent tool names.
+                5) Always prioritize the latest user request over older turns.
+                6) For databaseQuery, do not repeat previous failed SQL; generate SQL that matches the latest user request.
+                """.formatted(toolNames);
 
         Prompt prompt = Prompt.builder()
-                .chatOptions(this.chatOptions)
+                .chatOptions(chatOptions)
                 .messages(state.getMessages())
                 .build();
 
@@ -62,51 +86,105 @@ public class WorkerNode implements AgentNode {
 
         AssistantMessage output = response.getResult().getOutput();
         List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
-        String outputText = output.getText();
-        boolean hasMeaningfulText = outputText != null && !outputText.trim().isEmpty();
+        String outputText = output.getText() == null ? "" : output.getText().trim();
 
-        // If no tool call is produced, treat worker output as final answer.
         if (toolCalls == null || toolCalls.isEmpty()) {
-            if (hasMeaningfulText) {
-                state.getMessages().add(output);
-                state.getAttributes().put("latest_message", output);
-                state.setNextNode("FINISH");
+            String workerText;
+            if (looksLikeToolMarkup(outputText)) {
+                String maybeToolName = extractToolName(outputText);
+                if (!maybeToolName.isBlank() && (availableToolNames == null || !availableToolNames.contains(maybeToolName))) {
+                    workerText = "Detected unregistered tool call '" + maybeToolName + "'. Available tools: " + toolNames + ".";
+                } else {
+                    workerText = "Detected invalid tool-call markup. Available tools: " + toolNames + ".";
+                }
+                state.getAttributes().put("tool_failed", true);
+                state.getAttributes().put("last_tool_error", workerText);
+            } else if (!outputText.isBlank()) {
+                workerText = outputText;
             } else {
-                // Graceful fallback: never finish a round with empty visible text.
-                AssistantMessage fallback = new AssistantMessage("我没有生成有效回复，请换个问法再试一次。");
-                state.getMessages().add(fallback);
-                state.getAttributes().put("latest_message", fallback);
-                state.setNextNode("FINISH");
+                workerText = "Task processed, but no displayable output was produced.";
             }
+
+            state.getAttributes().put("worker_candidate_answer", workerText);
+            state.setNextNode("SUPERVISOR");
             return state;
         }
 
-        // Persist tool-call message and execute tools.
         state.getMessages().add(output);
         state.getAttributes().put("latest_tool_call_msg", output);
 
-        log.info("[GraphEngine] WORKER 决定执行工具...");
-        ToolExecutionResult executionResult = toolCallingManager.executeToolCalls(prompt, response);
+        try {
+            log.info("[GraphEngine] WORKER executing tool calls...");
+            ToolExecutionResult executionResult = toolCallingManager.executeToolCalls(prompt, response);
 
-        List<Message> history = executionResult.conversationHistory();
-        ToolResponseMessage toolResponseMsg = (ToolResponseMessage) history.get(history.size() - 1);
+            List<Message> history = executionResult.conversationHistory();
+            ToolResponseMessage toolResponseMsg = (ToolResponseMessage) history.get(history.size() - 1);
 
-        state.getMessages().add(toolResponseMsg);
-        state.getAttributes().put("latest_tool_response_msg", toolResponseMsg);
+            state.getMessages().add(toolResponseMsg);
+            state.getAttributes().put("latest_tool_response_msg", toolResponseMsg);
 
-        String logMsg = toolResponseMsg.getResponses().stream()
-                .map(r -> r.name() + " -> " + r.responseData())
-                .collect(Collectors.joining(", "));
-        log.info("[GraphEngine] 工具执行完毕，结果: {}", logMsg);
+            String logMsg = toolResponseMsg.getResponses().stream()
+                    .map(r -> r.name() + " -> " + r.responseData())
+                    .collect(Collectors.joining(", "));
+            log.info("[GraphEngine] Tool results: {}", logMsg);
 
-        // Build a direct final answer from tool results to avoid extra routing loops.
-        String finalText = toolResponseMsg.getResponses().stream()
-                .map(ToolResponseMessage.ToolResponse::responseData)
-                .collect(Collectors.joining("\n"));
-        AssistantMessage finalMsg = new AssistantMessage(finalText);
-        state.getMessages().add(finalMsg);
-        state.getAttributes().put("latest_message", finalMsg);
-        state.setNextNode("FINISH");
+            String responseData = toolResponseMsg.getResponses().stream()
+                    .map(ToolResponseMessage.ToolResponse::responseData)
+                    .collect(Collectors.joining("\n"));
+
+            if (isFailureText(responseData)) {
+                state.getAttributes().put("tool_failed", true);
+                state.getAttributes().put("last_tool_error", responseData);
+            }
+        } catch (Exception ex) {
+            log.error("[GraphEngine] Tool execution failed", ex);
+            String error = "Tool execution failed: " + ex.getMessage();
+            state.getAttributes().put("tool_failed", true);
+            state.getAttributes().put("last_tool_error", error);
+            state.getAttributes().put("worker_candidate_answer", error);
+        }
+
+        state.setNextNode("SUPERVISOR");
         return state;
+    }
+
+    private boolean looksLikeToolMarkup(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("dsml")
+                || lower.contains("function_calls")
+                || lower.contains("tool_calls")
+                || lower.contains("<invoke")
+                || lower.contains("<function")
+                || lower.contains("</function");
+    }
+
+    private String extractToolName(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        Matcher matcher = INVOKE_NAME_PATTERN.matcher(text);
+        if (matcher.find()) {
+            return matcher.group(1).trim();
+        }
+        return "";
+    }
+
+    private boolean isFailureText(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("error")
+                || lower.contains("exception")
+                || lower.contains("failed")
+                || lower.contains("timeout")
+                || lower.contains("not exist")
+                || lower.contains("invalid")
+                || lower.contains("失败")
+                || lower.contains("错误")
+                || lower.contains("不存在");
     }
 }
