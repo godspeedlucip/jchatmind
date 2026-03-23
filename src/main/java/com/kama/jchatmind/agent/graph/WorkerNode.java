@@ -127,15 +127,6 @@ public class WorkerNode implements AgentNode {
                     .map(r -> r.name() + " -> " + r.responseData())
                     .collect(Collectors.joining(", "));
             log.info("[GraphEngine] Tool results: {}", logMsg);
-
-            String responseData = toolResponseMsg.getResponses().stream()
-                    .map(ToolResponseMessage.ToolResponse::responseData)
-                    .collect(Collectors.joining("\n"));
-
-            if (isFailureText(responseData)) {
-                state.getAttributes().put("tool_failed", true);
-                state.getAttributes().put("last_tool_error", responseData);
-            }
         } catch (Exception ex) {
             log.error("[GraphEngine] Tool execution failed", ex);
             String error = "Tool execution failed: " + ex.getMessage();
@@ -170,21 +161,5 @@ public class WorkerNode implements AgentNode {
             return matcher.group(1).trim();
         }
         return "";
-    }
-
-    private boolean isFailureText(String text) {
-        if (text == null || text.isBlank()) {
-            return false;
-        }
-        String lower = text.toLowerCase(Locale.ROOT);
-        return lower.contains("error")
-                || lower.contains("exception")
-                || lower.contains("failed")
-                || lower.contains("timeout")
-                || lower.contains("not exist")
-                || lower.contains("invalid")
-                || lower.contains("失败")
-                || lower.contains("错误")
-                || lower.contains("不存在");
     }
 }

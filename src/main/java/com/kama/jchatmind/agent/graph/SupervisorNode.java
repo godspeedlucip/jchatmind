@@ -50,6 +50,7 @@ public class SupervisorNode implements AgentNode {
         boolean hasWeatherResult = hasToolResponseNamedInCurrentTurn(state, "weather");
         boolean latestIsToolResponse = hasLatestToolResponseInCurrentTurn(state);
         boolean hasToolFailure = hasRecentToolFailureInCurrentTurn(state);
+        boolean hasKnowledgeTool = hasToolName("KnowledgeTool");
 
         String toolNames = availableToolNames == null || availableToolNames.isEmpty()
                 ? "(none)"
@@ -67,7 +68,7 @@ public class SupervisorNode implements AgentNode {
                 Rules:
                 - Choose ROUTE: WORKER if additional tool calls are still required.
                 - Choose ROUTE: FINISH only when the task is complete or cannot continue safely.
-                - Final answer must be user-facing result only. No planning/process narration.
+                - Final answer must be user-facing result only.
                 - Never output DSML/XML/function-call markup.
                 - Never invent tool names.
                 """.formatted(toolNames);
@@ -87,21 +88,24 @@ public class SupervisorNode implements AgentNode {
         String text = modelText == null ? "" : modelText.trim();
         RouteDecision decision = parseDecision(text);
 
-        // 1) First-step intent forcing: only once, avoid loop.
+        if (stepCount <= 1 && hasKnowledgeTool && !hasToolFailure && !latestIsToolResponse) {
+            state.getAttributes().put("worker_hops", workerHops + 1);
+            state.setNextNode("WORKER");
+            return state;
+        }
+
         if (stepCount <= 1 && shouldForceWorkerByUserIntent(messages) && !hasToolFailure) {
             state.getAttributes().put("worker_hops", workerHops + 1);
             state.setNextNode("WORKER");
             return state;
         }
 
-        // 2) Weather guard: if weather intent and weather tool not yet executed in this turn, keep working.
         if (weatherIntent && !hasWeatherResult && workerHops < 6) {
             state.getAttributes().put("worker_hops", workerHops + 1);
             state.setNextNode("WORKER");
             return state;
         }
 
-        // 3) Decision handling.
         if (decision.route == Route.WORKER) {
             if (workerHops >= 6) {
                 AssistantMessage finalMsg = new AssistantMessage(fallbackFinalAnswer(state));
@@ -119,7 +123,14 @@ public class SupervisorNode implements AgentNode {
         if (decision.route == Route.FINISH) {
             String finalAnswer = decision.answer;
             if (finalAnswer.isBlank()) {
-                finalAnswer = !workerCandidateAnswer.isBlank() ? workerCandidateAnswer : fallbackFinalAnswer(state);
+                if (!workerCandidateAnswer.isBlank() && !latestIsToolResponse) {
+                    finalAnswer = workerCandidateAnswer;
+                } else {
+                    finalAnswer = synthesizeNaturalLanguageAnswer(state);
+                }
+            }
+            if (finalAnswer.isBlank()) {
+                finalAnswer = fallbackFinalAnswer(state);
             }
             AssistantMessage finalMsg = new AssistantMessage(stripProcessText(finalAnswer));
             state.getMessages().add(finalMsg);
@@ -129,7 +140,6 @@ public class SupervisorNode implements AgentNode {
             return state;
         }
 
-        // 4) Invalid decision fallback.
         if (hasToolFailure) {
             AssistantMessage finalMsg = new AssistantMessage(fallbackFinalAnswer(state));
             state.getMessages().add(finalMsg);
@@ -149,8 +159,11 @@ public class SupervisorNode implements AgentNode {
         }
 
         if (latestIsToolResponse) {
-            // If tool has run in this turn and model gives no valid route, finish with concise summary.
-            AssistantMessage finalMsg = new AssistantMessage(fallbackFinalAnswer(state));
+            String finalAnswer = synthesizeNaturalLanguageAnswer(state);
+            if (finalAnswer.isBlank()) {
+                finalAnswer = fallbackFinalAnswer(state);
+            }
+            AssistantMessage finalMsg = new AssistantMessage(stripProcessText(finalAnswer));
             state.getMessages().add(finalMsg);
             state.getAttributes().put("latest_message", finalMsg);
             state.getAttributes().put("worker_hops", 0);
@@ -161,6 +174,37 @@ public class SupervisorNode implements AgentNode {
         state.getAttributes().put("worker_hops", workerHops + 1);
         state.setNextNode("WORKER");
         return state;
+    }
+
+    private String synthesizeNaturalLanguageAnswer(AgentGraphState state) {
+        try {
+            Prompt prompt = Prompt.builder()
+                    .chatOptions(chatOptions)
+                    .messages(state.getMessages())
+                    .build();
+
+            ChatResponse response = chatClient.prompt(prompt)
+                    .system("""
+                            You are the final answer composer.
+                            Write a natural-language answer for the user's latest question.
+                            Rules:
+                            - Do not output raw tool payloads, XML, JSON, or markup.
+                            - Do not expose source metadata fields (kbId, docId, snippet index).
+                            - Use retrieval snippets as evidence only.
+                            - If evidence is insufficient, clearly state the gap.
+                            - Do not promise actions that are not actually executed in this turn.
+                            - If more retrieval is needed, state what evidence is missing instead of pretending to continue.
+                            """)
+                    .call()
+                    .chatClientResponse()
+                    .chatResponse();
+
+            String text = response.getResult().getOutput().getText();
+            return text == null ? "" : stripProcessText(text);
+        } catch (Exception e) {
+            log.warn("[GraphEngine] Failed to synthesize final answer: {}", e.getMessage());
+            return "";
+        }
     }
 
     private RouteDecision parseDecision(String text) {
@@ -184,44 +228,24 @@ public class SupervisorNode implements AgentNode {
 
     private boolean hasRecentToolFailureInCurrentTurn(AgentGraphState state) {
         Object failed = state.getAttributes().get("tool_failed");
-        if (failed instanceof Boolean b && b) {
-            return true;
-        }
-
-        List<Message> messages = state.getMessages();
-        if (messages == null || messages.isEmpty()) {
-            return false;
-        }
-        int turnStart = getTurnStartIndex(state, messages);
-
-        for (int i = messages.size() - 1; i >= turnStart; i--) {
-            Message message = messages.get(i);
-            if (message instanceof ToolResponseMessage toolResponseMessage && toolResponseMessage.getResponses() != null) {
-                for (ToolResponseMessage.ToolResponse response : toolResponseMessage.getResponses()) {
-                    if (isFailureText(response.responseData())) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+        return failed instanceof Boolean b && b;
     }
 
     private String fallbackFinalAnswer(AgentGraphState state) {
         Object err = state.getAttributes().get("last_tool_error");
         if (err instanceof String s && !s.isBlank()) {
-            return "工具执行失败，暂时无法完成请求。错误摘要: " + clip(s, 220) + "。";
+            return "Tool execution failed. Error summary: " + clip(s, 220);
         }
 
         String latestTool = latestToolResponseTextInCurrentTurn(state);
         if (!latestTool.isBlank()) {
-            if (isFailureText(latestTool)) {
-                return "工具执行失败，暂时无法完成请求。错误摘要: " + clip(latestTool, 220) + "。";
+            String synthesized = synthesizeNaturalLanguageAnswer(state);
+            if (!synthesized.isBlank()) {
+                return synthesized;
             }
-            return stripProcessText(latestTool);
         }
 
-        return "本轮未获得有效结果，请补充更具体条件后重试。";
+        return "No valid result was produced in this round. Please refine the question and retry.";
     }
 
     private String latestToolResponseTextInCurrentTurn(AgentGraphState state) {
@@ -288,15 +312,12 @@ public class SupervisorNode implements AgentNode {
                 }
                 String lower = text.toLowerCase(Locale.ROOT);
                 return lower.contains("weather")
-                        || lower.contains("天气")
-                        || lower.contains("汇率")
                         || lower.contains("exchange")
                         || lower.contains("sql")
-                        || lower.contains("数据库")
-                        || lower.contains("查询")
-                        || lower.contains("邮件")
+                        || lower.contains("database")
+                        || lower.contains("query")
                         || lower.contains("email")
-                        || lower.contains("知识库");
+                        || lower.contains("knowledge");
             }
         }
         return false;
@@ -314,7 +335,7 @@ public class SupervisorNode implements AgentNode {
                     return false;
                 }
                 String lower = text.toLowerCase(Locale.ROOT);
-                return lower.contains("weather") || lower.contains("天气");
+                return lower.contains("weather");
             }
         }
         return false;
@@ -340,6 +361,21 @@ public class SupervisorNode implements AgentNode {
         return defaultValue;
     }
 
+    private boolean hasToolName(String expectedToolName) {
+        if (expectedToolName == null || expectedToolName.isBlank()) {
+            return false;
+        }
+        if (availableToolNames == null || availableToolNames.isEmpty()) {
+            return false;
+        }
+        for (String toolName : availableToolNames) {
+            if (expectedToolName.equalsIgnoreCase(toolName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String getStringAttr(AgentGraphState state, String key) {
         Object value = state.getAttributes().get(key);
         if (value instanceof String text) {
@@ -348,28 +384,12 @@ public class SupervisorNode implements AgentNode {
         return "";
     }
 
-    private boolean isFailureText(String text) {
-        if (text == null || text.isBlank()) {
-            return false;
-        }
-        String lower = text.toLowerCase(Locale.ROOT);
-        return lower.contains("error")
-                || lower.contains("exception")
-                || lower.contains("failed")
-                || lower.contains("timeout")
-                || lower.contains("not exist")
-                || lower.contains("invalid")
-                || lower.contains("失败")
-                || lower.contains("错误")
-                || lower.contains("不存在");
-    }
-
     private String stripProcessText(String text) {
         if (text == null) {
             return "";
         }
         String cleaned = text.trim();
-        cleaned = cleaned.replaceAll("(?i)^(现在|接下来|我将|我会|让我)[^。！？!?.]*[。！？!?.]?", "").trim();
+        cleaned = cleaned.replaceAll("(?i)^(now|next|i will|let me)[^.?!]*[.?!]?", "").trim();
         return cleaned.isBlank() ? text.trim() : cleaned;
     }
 

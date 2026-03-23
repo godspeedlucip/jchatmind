@@ -16,25 +16,30 @@ public class KnowledgeBaseController {
 
     private final KnowledgeBaseFacadeService knowledgeBaseFacadeService;
 
-    // 查询所有知识库
+    // List all knowledge bases
     @GetMapping("/knowledge-bases")
     public ApiResponse<GetKnowledgeBasesResponse> getKnowledgeBases() {
         return ApiResponse.success(knowledgeBaseFacadeService.getKnowledgeBases());
     }
 
-    // 创建知识�?    @PostMapping("/knowledge-bases")
+    // Create a knowledge base
+    @PostMapping("/knowledge-bases")
     public ApiResponse<CreateKnowledgeBaseResponse> createKnowledgeBase(@RequestBody CreateKnowledgeBaseRequest request) {
         return ApiResponse.success(knowledgeBaseFacadeService.createKnowledgeBase(request));
     }
 
-    // 删除知识�?    @DeleteMapping("/knowledge-bases/{knowledgeBaseId}")
+    // Delete a knowledge base
+    @DeleteMapping("/knowledge-bases/{knowledgeBaseId}")
     public ApiResponse<Void> deleteKnowledgeBase(@PathVariable("knowledgeBaseId") String knowledgeBaseId) {
         knowledgeBaseFacadeService.deleteKnowledgeBase(knowledgeBaseId);
         return ApiResponse.success();
     }
 
-    // 更新知识�?    @PatchMapping("/knowledge-bases/{knowledgeBaseId}")
-    public ApiResponse<Void> updateKnowledgeBase(@PathVariable("knowledgeBaseId") String knowledgeBaseId, @RequestBody UpdateKnowledgeBaseRequest request) {
+    // Update a knowledge base
+    @PatchMapping("/knowledge-bases/{knowledgeBaseId}")
+    public ApiResponse<Void> updateKnowledgeBase(
+            @PathVariable("knowledgeBaseId") String knowledgeBaseId,
+            @RequestBody UpdateKnowledgeBaseRequest request) {
         knowledgeBaseFacadeService.updateKnowledgeBase(knowledgeBaseId, request);
         return ApiResponse.success();
     }

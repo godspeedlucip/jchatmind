@@ -27,4 +27,14 @@ public interface ChunkBgeM3Mapper {
             @Param("vectorLiteral") String vectorLiteral,
             @Param("limit") int limit
     );
+
+    List<ChunkBgeM3> similaritySearchAllKnowledgeBases(
+            @Param("vectorLiteral") String vectorLiteral,
+            @Param("limit") int limit
+    );
+
+    List<ChunkBgeM3> keywordSearchAllKnowledgeBases(
+            @Param("keywords") List<String> keywords,
+            @Param("limit") int limit
+    );
 }

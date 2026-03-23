@@ -93,9 +93,61 @@
                created_at,
                updated_at
         FROM chunk_bge_m3
-        WHERE kb_id = CAST(#{kbId} AS uuid)
+        WHERE kb_id::text = #{kbId}
         ORDER BY embedding <-> #{vectorLiteral}::vector
         LIMIT #{limit}
         ]]>
+    </select>
+
+    <select id="similaritySearchAllKnowledgeBases" resultMap="BaseResultMap">
+        <![CDATA[
+        SELECT id,
+               kb_id,
+               doc_id,
+               content,
+               metadata,
+               embedding,
+               created_at,
+               updated_at
+        FROM chunk_bge_m3
+        ORDER BY embedding <-> #{vectorLiteral}::vector
+        LIMIT #{limit}
+        ]]>
+    </select>
+
+    <select id="keywordSearchAllKnowledgeBases" resultMap="BaseResultMap">
+        SELECT id,
+               kb_id,
+               doc_id,
+               content,
+               metadata,
+               embedding,
+               created_at,
+               updated_at
+        FROM chunk_bge_m3
+        <where>
+            <if test="keywords != null and keywords.size() > 0">
+                (
+                <foreach collection="keywords" item="kw" separator=" OR ">
+                    lower(content) LIKE CONCAT('%', lower(#{kw}), '%')
+                </foreach>
+                )
+            </if>
+        </where>
+        ORDER BY
+        <choose>
+            <when test="keywords != null and keywords.size() > 0">
+                (
+                <foreach collection="keywords" item="kw" separator="+">
+                    CASE
+                    WHEN lower(content) LIKE CONCAT('%', lower(#{kw}), '%') THEN 1
+                    ELSE 0
+                    END
+                </foreach>
+                ) DESC,
+            </when>
+        </choose>
+        updated_at DESC
+        LIMIT #{limit}
     </select>
 </mapper>
