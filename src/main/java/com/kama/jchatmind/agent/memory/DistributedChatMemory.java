@@ -9,18 +9,20 @@ import com.kama.jchatmind.service.ChatMessageFacadeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.messages.*;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
- * 分布式会话存放：将会话历史持久化转移至 Redis 做热缓存 + PostgreSQL 做冷备
+ * Distributed chat memory with Redis hot cache + DB cold storage.
  */
 public class DistributedChatMemory implements ChatMemory {
 
@@ -32,18 +34,21 @@ public class DistributedChatMemory implements ChatMemory {
     private final ObjectMapper objectMapper;
 
     private static final String KEY_PREFIX = "chat:memory:";
-    private static final long CACHE_TTL_HOURS = 24; // 热缓存暂设为 24 小时过期
+    private static final long CACHE_TTL_HOURS = 24;
 
-    public DistributedChatMemory(RedisTemplate<String, Object> redisTemplate, 
-                                 ChatMessageFacadeService chatMessageFacadeService, 
+    public DistributedChatMemory(RedisTemplate<String, Object> redisTemplate,
+                                 ChatMessageFacadeService chatMessageFacadeService,
                                  int maxMessages) {
         this.redisTemplate = redisTemplate;
         this.chatMessageFacadeService = chatMessageFacadeService;
         this.maxMessages = maxMessages;
-        
-        // 用于 Redis 中序列化和反序列化 MessageDTO
+
         this.objectMapper = new ObjectMapper();
-        this.objectMapper.activateDefaultTyping(LaissezFaireSubTypeValidator.instance, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+        this.objectMapper.activateDefaultTyping(
+                LaissezFaireSubTypeValidator.instance,
+                ObjectMapper.DefaultTyping.NON_FINAL,
+                JsonTypeInfo.As.PROPERTY
+        );
     }
 
     private String getCacheKey(String conversationId) {
@@ -57,18 +62,12 @@ public class DistributedChatMemory implements ChatMemory {
         }
 
         String key = getCacheKey(conversationId);
-        
-        // 1. 将现有的历史记录覆盖到 Redis 中
-        // 注意：因为 JChatMind 是把本轮新的记录全量放回来，并且加上了新增消息，我们目前采取对该 key 进行覆写或 Trim
         redisTemplate.delete(key);
-        
-        // 仅保留最新的 maxMessages 条记录
+
         int startIndex = Math.max(0, messages.size() - maxMessages);
         List<Message> messagesToSave = messages.subList(startIndex, messages.size());
-        
-        // 转化为可序列化的 DTO 存入缓存
         List<ChatMessageDTO> dtoList = convertToDTOs(messagesToSave);
-        
+
         try {
             for (ChatMessageDTO dto : dtoList) {
                 String json = objectMapper.writeValueAsString(dto);
@@ -84,42 +83,30 @@ public class DistributedChatMemory implements ChatMemory {
     public List<Message> get(String conversationId) {
         String key = getCacheKey(conversationId);
         Long size = redisTemplate.opsForList().size(key);
-        
+
         if (size != null && size > 0) {
-            // Redis 命中 (热缓存)
-            int fetchCount = maxMessages;
-            List<Object> cachedData = redisTemplate.opsForList().range(key, -fetchCount, -1);
+            List<Object> cachedData = redisTemplate.opsForList().range(key, -maxMessages, -1);
             if (cachedData != null && !cachedData.isEmpty()) {
-                log.info("Hit Redis cache for conversationId: {}", conversationId);
-                List<ChatMessageDTO> dtoList = new ArrayList<>();
                 try {
+                    List<ChatMessageDTO> dtoList = new ArrayList<>();
                     for (Object obj : cachedData) {
-                        ChatMessageDTO dto = objectMapper.readValue((String) obj, ChatMessageDTO.class);
-                        dtoList.add(dto);
+                        dtoList.add(objectMapper.readValue((String) obj, ChatMessageDTO.class));
                     }
                     return convertToMessages(dtoList);
                 } catch (Exception e) {
-                    log.error("Failed to deserialize message from Redis cache, falling back to PostgreSQL", e);
-                    // 反序列化失败，清除缓存，fallback 到 DB
+                    log.error("Failed to deserialize Redis cache, fallback to DB", e);
                     redisTemplate.delete(key);
                 }
             }
         }
-        
-        // Redis 未命中 (冷备)，从 PostgreSQL 读取最近的消息
-        log.info("Miss Redis cache, loading from PostgreSQL for conversationId: {}", conversationId);
-        int fetchCount = maxMessages;
-        List<ChatMessageDTO> dbMessages = chatMessageFacadeService.getChatMessagesBySessionIdRecently(conversationId, fetchCount);
-        
+
+        List<ChatMessageDTO> dbMessages = chatMessageFacadeService.getChatMessagesBySessionIdRecently(conversationId, maxMessages);
         if (dbMessages == null || dbMessages.isEmpty()) {
             return new ArrayList<>();
         }
-        
+
         List<Message> loadedMessages = convertToMessages(dbMessages);
-        
-        // 加载后回写预热 Redis
         add(conversationId, loadedMessages);
-        
         return loadedMessages;
     }
 
@@ -127,29 +114,36 @@ public class DistributedChatMemory implements ChatMemory {
     public void clear(String conversationId) {
         redisTemplate.delete(getCacheKey(conversationId));
     }
-    
-    // --- 转换方法 ---
+
     private List<ChatMessageDTO> convertToDTOs(List<Message> messages) {
         List<ChatMessageDTO> dtos = new ArrayList<>();
-        ChatMessageDTO.ChatMessageDTOBuilder builder = ChatMessageDTO.builder();
-        
         for (Message msg : messages) {
-            if (msg instanceof SystemMessage) {
-                SystemMessage sysMsg = (SystemMessage) msg;
-                dtos.add(builder.role(ChatMessageDTO.RoleType.SYSTEM).content(sysMsg.getText()).build());
-            } else if (msg instanceof UserMessage) {
-                UserMessage userMsg = (UserMessage) msg;
-                dtos.add(builder.role(ChatMessageDTO.RoleType.USER).content(userMsg.getText()).build());
-            } else if (msg instanceof AssistantMessage) {
-                AssistantMessage astMsg = (AssistantMessage) msg;
-                dtos.add(builder.role(ChatMessageDTO.RoleType.ASSISTANT).content(astMsg.getText())
-                        .metadata(ChatMessageDTO.MetaData.builder().toolCalls(astMsg.getToolCalls()).build())
+            if (msg instanceof SystemMessage sysMsg) {
+                dtos.add(ChatMessageDTO.builder()
+                        .role(ChatMessageDTO.RoleType.SYSTEM)
+                        .content(sysMsg.getText())
                         .build());
-            } else if (msg instanceof ToolResponseMessage) {
-                ToolResponseMessage toolMsg = (ToolResponseMessage) msg;
+            } else if (msg instanceof UserMessage userMsg) {
+                dtos.add(ChatMessageDTO.builder()
+                        .role(ChatMessageDTO.RoleType.USER)
+                        .content(userMsg.getText())
+                        .build());
+            } else if (msg instanceof AssistantMessage astMsg) {
+                dtos.add(ChatMessageDTO.builder()
+                        .role(ChatMessageDTO.RoleType.ASSISTANT)
+                        .content(astMsg.getText())
+                        .metadata(ChatMessageDTO.MetaData.builder()
+                                .toolCalls(astMsg.getToolCalls())
+                                .build())
+                        .build());
+            } else if (msg instanceof ToolResponseMessage toolMsg) {
                 for (ToolResponseMessage.ToolResponse tr : toolMsg.getResponses()) {
-                    dtos.add(builder.role(ChatMessageDTO.RoleType.TOOL).content(tr.responseData())
-                            .metadata(ChatMessageDTO.MetaData.builder().toolResponse(tr).build())
+                    dtos.add(ChatMessageDTO.builder()
+                            .role(ChatMessageDTO.RoleType.TOOL)
+                            .content(tr.responseData())
+                            .metadata(ChatMessageDTO.MetaData.builder()
+                                    .toolResponse(tr)
+                                    .build())
                             .build());
                 }
             }
@@ -159,32 +153,56 @@ public class DistributedChatMemory implements ChatMemory {
 
     private List<Message> convertToMessages(List<ChatMessageDTO> chatMessages) {
         List<Message> memory = new ArrayList<>();
-        for (ChatMessageDTO chatMessageDTO : chatMessages) {
-            switch (chatMessageDTO.getRole()) {
-                case SYSTEM:
-                    if (!StringUtils.hasLength(chatMessageDTO.getContent())) continue;
-                    memory.add(0, new SystemMessage(chatMessageDTO.getContent())); // 倒序的话注意 这里可能不需要 add(0) 依赖查询结果顺序
-                    break;
-                case USER:
-                    if (!StringUtils.hasLength(chatMessageDTO.getContent())) continue;
-                    memory.add(new UserMessage(chatMessageDTO.getContent()));
-                    break;
-                case ASSISTANT:
+        boolean canAppendToolResponse = false;
+
+        for (ChatMessageDTO dto : chatMessages) {
+            if (dto.getRole() == null) {
+                continue;
+            }
+
+            switch (dto.getRole()) {
+                case SYSTEM -> {
+                    if (!StringUtils.hasLength(dto.getContent())) {
+                        continue;
+                    }
+                    memory.add(new SystemMessage(dto.getContent()));
+                    canAppendToolResponse = false;
+                }
+                case USER -> {
+                    if (!StringUtils.hasLength(dto.getContent())) {
+                        continue;
+                    }
+                    memory.add(new UserMessage(dto.getContent()));
+                    canAppendToolResponse = false;
+                }
+                case ASSISTANT -> {
+                    List<AssistantMessage.ToolCall> toolCalls =
+                            dto.getMetadata() == null ? null : dto.getMetadata().getToolCalls();
+                    boolean hasText = StringUtils.hasLength(dto.getContent());
+                    boolean hasToolCalls = toolCalls != null && !toolCalls.isEmpty();
+                    if (!hasText && !hasToolCalls) {
+                        continue;
+                    }
                     memory.add(AssistantMessage.builder()
-                            .content(chatMessageDTO.getContent())
-                            .toolCalls(chatMessageDTO.getMetadata() == null ? null : chatMessageDTO.getMetadata().getToolCalls())
+                            .content(dto.getContent())
+                            .toolCalls(toolCalls)
                             .build());
-                    break;
-                case TOOL:
+                    canAppendToolResponse = hasToolCalls;
+                }
+                case TOOL -> {
+                    if (!canAppendToolResponse
+                            || dto.getMetadata() == null
+                            || dto.getMetadata().getToolResponse() == null) {
+                        log.warn("Skip orphan tool message in memory reconstruction, id={}", dto.getId());
+                        continue;
+                    }
                     memory.add(ToolResponseMessage.builder()
-                            .responses(List.of(chatMessageDTO.getMetadata().getToolResponse()))
+                            .responses(List.of(dto.getMetadata().getToolResponse()))
                             .build());
-                    break;
-                default:
-                    log.error("不支持的 Message 类型: {}, content = {}", chatMessageDTO.getRole().getRole(), chatMessageDTO.getContent());
-                    break;
+                }
             }
         }
+
         return memory;
     }
 }
