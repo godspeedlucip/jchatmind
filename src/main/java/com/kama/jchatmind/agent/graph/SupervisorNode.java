@@ -121,12 +121,15 @@ public class SupervisorNode implements AgentNode {
         }
 
         if (decision.route == Route.FINISH) {
-            String finalAnswer = decision.answer;
-            if (finalAnswer.isBlank()) {
-                if (!workerCandidateAnswer.isBlank() && !latestIsToolResponse) {
-                    finalAnswer = workerCandidateAnswer;
-                } else {
-                    finalAnswer = synthesizeNaturalLanguageAnswer(state);
+            String finalAnswer;
+            if (latestIsToolResponse) {
+                finalAnswer = synthesizeNaturalLanguageAnswer(state);
+            } else {
+                finalAnswer = decision.answer;
+                if (finalAnswer.isBlank()) {
+                    finalAnswer = !workerCandidateAnswer.isBlank()
+                            ? workerCandidateAnswer
+                            : synthesizeNaturalLanguageAnswer(state);
                 }
             }
             if (finalAnswer.isBlank()) {
@@ -178,29 +181,51 @@ public class SupervisorNode implements AgentNode {
 
     private String synthesizeNaturalLanguageAnswer(AgentGraphState state) {
         try {
+            String latestUserQuestion = latestUserQuestionText(state.getMessages());
+            String latestToolText = latestToolResponseTextInCurrentTurn(state);
+            if (latestToolText.isBlank()) {
+                return "";
+            }
+            if (latestToolText.toLowerCase(Locale.ROOT).contains("no relevant knowledge found")) {
+                return "No relevant knowledge snippet was retrieved. Please refine the query keywords.";
+            }
+
+            String synthesisInput = """
+                    User question:
+                    %s
+
+                    Retrieved snippets:
+                    %s
+                    """.formatted(
+                    latestUserQuestion.isBlank() ? "(unknown)" : latestUserQuestion,
+                    clip(latestToolText, 3000)
+            );
+
             Prompt prompt = Prompt.builder()
                     .chatOptions(chatOptions)
-                    .messages(state.getMessages())
+                    .messages(List.of(new UserMessage(synthesisInput)))
                     .build();
 
             ChatResponse response = chatClient.prompt(prompt)
                     .system("""
                             You are the final answer composer.
-                            Write a natural-language answer for the user's latest question.
+                            Write a direct answer for the user's latest question using ONLY the provided retrieval snippets.
                             Rules:
-                            - Do not output raw tool payloads, XML, JSON, or markup.
-                            - Do not expose source metadata fields (kbId, docId, snippet index).
-                            - Use retrieval snippets as evidence only.
-                            - If evidence is insufficient, clearly state the gap.
-                            - Do not promise actions that are not actually executed in this turn.
-                            - If more retrieval is needed, state what evidence is missing instead of pretending to continue.
+                            - Focus on the asked question and ignore unrelated snippet parts.
+                            - Do not output raw payload markers, metadata, XML/JSON, or tool names.
+                            - Do not say you will continue searching/retrieving.
+                            - If snippets are insufficient, say what is missing in one short sentence.
                             """)
                     .call()
                     .chatClientResponse()
                     .chatResponse();
 
             String text = response.getResult().getOutput().getText();
-            return text == null ? "" : stripProcessText(text);
+            String cleaned = text == null ? "" : stripProcessText(text);
+            if (looksLikeDeferral(cleaned)) {
+                return summarizeFromSnippet(latestToolText);
+            }
+            return cleaned;
         } catch (Exception e) {
             log.warn("[GraphEngine] Failed to synthesize final answer: {}", e.getMessage());
             return "";
@@ -239,10 +264,7 @@ public class SupervisorNode implements AgentNode {
 
         String latestTool = latestToolResponseTextInCurrentTurn(state);
         if (!latestTool.isBlank()) {
-            String synthesized = synthesizeNaturalLanguageAnswer(state);
-            if (!synthesized.isBlank()) {
-                return synthesized;
-            }
+            return clip(latestTool.replace("\\n", "\n").replace("\"", "").trim(), 480);
         }
 
         return "No valid result was produced in this round. Please refine the question and retry.";
@@ -401,6 +423,57 @@ public class SupervisorNode implements AgentNode {
             return text;
         }
         return text.substring(0, maxLen) + "...";
+    }
+
+    private String latestUserQuestionText(List<Message> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return "";
+        }
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message message = messages.get(i);
+            if (message instanceof UserMessage userMessage) {
+                return userMessage.getText() == null ? "" : userMessage.getText().trim();
+            }
+        }
+        return "";
+    }
+
+    private boolean looksLikeDeferral(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("let me search")
+                || lower.contains("i will search")
+                || lower.contains("search more")
+                || lower.contains("retrieve more")
+                || text.contains("\u8ba9\u6211\u518d\u641c\u7d22")
+                || text.contains("\u6211\u518d\u68c0\u7d22")
+                || text.contains("\u7ee7\u7eed\u68c0\u7d22");
+    }
+
+    private String summarizeFromSnippet(String latestToolText) {
+        if (latestToolText == null || latestToolText.isBlank()) {
+            return "";
+        }
+        String cleaned = latestToolText
+                .replace("\\n", "\n")
+                .replace("RETRIEVAL_SNIPPETS", "")
+                .replace("Use this section for reasoning and answering.", "")
+                .replace("\"", "")
+                .trim();
+        String[] parts = cleaned.split("\\r?\\n\\s*\\r?\\n");
+        for (String part : parts) {
+            String p = part.trim();
+            if (p.isBlank()) {
+                continue;
+            }
+            if (p.toLowerCase(Locale.ROOT).contains("source_meta_for_display_only")) {
+                continue;
+            }
+            return clip(p, 380);
+        }
+        return clip(cleaned, 380);
     }
 
     private enum Route {

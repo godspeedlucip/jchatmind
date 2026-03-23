@@ -16,10 +16,11 @@ import java.util.regex.Pattern;
 @Component
 public class KnowledgeTools implements Tool {
 
-    private static final int TOP_K = 5;
+    private static final int TOP_K = 3;
     private static final int DENSE_CANDIDATE_LIMIT = 24;
     private static final int SPARSE_CANDIDATE_LIMIT = 24;
     private static final int RRF_K = 60;
+    private static final double CONFIDENCE_THRESHOLD = 0.60;
     private static final Pattern TOKEN_PATTERN = Pattern.compile("[\\p{L}\\p{N}_\\-.]+");
 
     private final RagService ragService;
@@ -66,14 +67,23 @@ public class KnowledgeTools implements Tool {
                 ? List.of()
                 : chunkBgeM3Mapper.keywordSearchAllKnowledgeBases(keywords, SPARSE_CANDIDATE_LIMIT);
 
-        List<ChunkBgeM3> chunks = fuseByWeightedRrf(denseChunks, sparseChunks, denseWeight, sparseWeight, TOP_K);
+        List<ScoredChunk> chunks = rankHybridCandidates(denseChunks, sparseChunks, keywords, denseWeight, sparseWeight, TOP_K);
 
         if (chunks == null || chunks.isEmpty()) {
             return "No relevant knowledge found across all knowledge bases.";
         }
 
+        List<ScoredChunk> accepted = chunks.stream()
+                .filter(scored -> scored != null && scored.confidence >= CONFIDENCE_THRESHOLD)
+                .toList();
+
+        if (accepted.isEmpty()) {
+            accepted = chunks.stream().limit(1).toList();
+        }
+
         List<ChunkBgeM3> valid = new ArrayList<>();
-        for (ChunkBgeM3 chunk : chunks) {
+        for (ScoredChunk scored : accepted) {
+            ChunkBgeM3 chunk = scored.chunk;
             if (chunk != null && chunk.getContent() != null && !chunk.getContent().trim().isEmpty()) {
                 valid.add(chunk);
             }
@@ -176,30 +186,49 @@ public class KnowledgeTools implements Tool {
         return alphaCount >= 2;
     }
 
-    private List<ChunkBgeM3> fuseByWeightedRrf(
+    private List<ScoredChunk> rankHybridCandidates(
             List<ChunkBgeM3> dense,
             List<ChunkBgeM3> sparse,
+            List<String> keywords,
             double denseWeight,
             double sparseWeight,
             int topK) {
         Map<String, ChunkBgeM3> byId = new HashMap<>();
         Map<String, Double> scoreById = new HashMap<>();
+        Map<String, Integer> denseRankById = new HashMap<>();
+        Map<String, Integer> sparseRankById = new HashMap<>();
 
-        accumulateRrf(dense, denseWeight, byId, scoreById);
-        accumulateRrf(sparse, sparseWeight, byId, scoreById);
+        accumulateRrf(dense, denseWeight, byId, scoreById, denseRankById);
+        accumulateRrf(sparse, sparseWeight, byId, scoreById, sparseRankById);
 
-        return scoreById.entrySet().stream()
+        List<ScoredChunk> ranked = scoreById.entrySet().stream()
                 .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
+                .map(entry -> {
+                    String id = entry.getKey();
+                    ChunkBgeM3 chunk = byId.get(id);
+                    double confidence = estimateConfidence(
+                            chunk,
+                            keywords,
+                            denseRankById.get(id),
+                            sparseRankById.get(id),
+                            denseWeight,
+                            sparseWeight
+                    );
+                    return new ScoredChunk(chunk, confidence);
+                })
+                .sorted((a, b) -> Double.compare(b.confidence, a.confidence))
                 .limit(topK)
-                .map(entry -> byId.get(entry.getKey()))
                 .toList();
+
+        return ranked;
     }
 
     private void accumulateRrf(
             List<ChunkBgeM3> chunks,
             double weight,
             Map<String, ChunkBgeM3> byId,
-            Map<String, Double> scoreById) {
+            Map<String, Double> scoreById,
+            Map<String, Integer> rankById) {
         if (chunks == null || chunks.isEmpty()) {
             return;
         }
@@ -211,10 +240,68 @@ public class KnowledgeTools implements Tool {
             }
             String id = chunk.getId();
             byId.putIfAbsent(id, chunk);
+            rankById.putIfAbsent(id, rank);
             double score = weight / (RRF_K + rank);
             scoreById.put(id, scoreById.getOrDefault(id, 0.0) + score);
             rank++;
         }
+    }
+
+    private double estimateConfidence(
+            ChunkBgeM3 chunk,
+            List<String> keywords,
+            Integer denseRank,
+            Integer sparseRank,
+            double denseWeight,
+            double sparseWeight) {
+        if (chunk == null || chunk.getContent() == null) {
+            return 0.0;
+        }
+        String text = chunk.getContent().toLowerCase(Locale.ROOT);
+
+        double denseScore = rankToScore(denseRank);
+        double sparseScore = rankToScore(sparseRank);
+        double retrievalScore = denseWeight * denseScore + sparseWeight * sparseScore;
+
+        int matched = 0;
+        for (String kw : keywords) {
+            if (text.contains(kw.toLowerCase(Locale.ROOT))) {
+                matched++;
+            }
+        }
+        double keywordCoverage = keywords.isEmpty() ? 0.0 : (double) matched / keywords.size();
+
+        int headingLevel = detectHeadingLevel(chunk.getContent());
+        double granularityBonus = headingLevel >= 2 ? 0.18 : 0.0;
+
+        double confidence = 0.55 * retrievalScore + 0.45 * keywordCoverage + granularityBonus;
+        return Math.max(0.0, Math.min(1.0, confidence));
+    }
+
+    private double rankToScore(Integer rank) {
+        if (rank == null) {
+            return 0.0;
+        }
+        return 1.0 / (1.0 + Math.log10(rank + 1.0));
+    }
+
+    private int detectHeadingLevel(String content) {
+        if (content == null || content.isBlank()) {
+            return 99;
+        }
+        String[] lines = content.split("\\r?\\n", 2);
+        if (lines.length == 0) {
+            return 99;
+        }
+        String first = lines[0].trim();
+        int level = 0;
+        while (level < first.length() && first.charAt(level) == '#') {
+            level++;
+        }
+        if (level >= 1 && level <= 6) {
+            return level;
+        }
+        return 99;
     }
 
     private String buildFocusedSnippet(String content, List<String> keywords) {
@@ -258,5 +345,15 @@ public class KnowledgeTools implements Tool {
     private enum QueryMode {
         PRECISE,
         SEMANTIC
+    }
+
+    private static class ScoredChunk {
+        private final ChunkBgeM3 chunk;
+        private final double confidence;
+
+        private ScoredChunk(ChunkBgeM3 chunk, double confidence) {
+            this.chunk = chunk;
+            this.confidence = confidence;
+        }
     }
 }
