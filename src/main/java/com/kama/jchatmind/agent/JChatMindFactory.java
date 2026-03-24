@@ -2,8 +2,10 @@ package com.kama.jchatmind.agent;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.kama.jchatmind.agent.graph.GraphEngine;
+import com.kama.jchatmind.agent.graph.RagWorkerNode;
+import com.kama.jchatmind.agent.graph.SqlWorkerNode;
 import com.kama.jchatmind.agent.graph.SupervisorNode;
-import com.kama.jchatmind.agent.graph.WorkerNode;
+import com.kama.jchatmind.agent.graph.ToolWorkerNode;
 import com.kama.jchatmind.agent.tools.Tool;
 import com.kama.jchatmind.config.ChatClientRegistry;
 import com.kama.jchatmind.converter.AgentConverter;
@@ -24,7 +26,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.aop.support.AopUtils;
@@ -200,6 +201,32 @@ public class JChatMindFactory {
         return tool;
     }
 
+    private boolean toolSupportsDeclaredName(Tool tool, String expectedName) {
+        if (tool == null || expectedName == null || expectedName.isBlank()) {
+            return false;
+        }
+        if (expectedName.equalsIgnoreCase(tool.getName())) {
+            return true;
+        }
+        Class<?> targetClass = resolveToolClass(tool);
+        for (Method method : targetClass.getMethods()) {
+            org.springframework.ai.tool.annotation.Tool annotation =
+                    method.getAnnotation(org.springframework.ai.tool.annotation.Tool.class);
+            if (annotation == null) {
+                continue;
+            }
+            String declaredName = annotation.name();
+            if (declaredName != null && !declaredName.isBlank()) {
+                if (expectedName.equalsIgnoreCase(declaredName)) {
+                    return true;
+                }
+            } else if (expectedName.equalsIgnoreCase(method.getName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
         public JChatMind create(String agentId, String chatSessionId) {
         Agent agent = loadAgent(agentId);
         AgentDTO agentConfig = toAgentConfig(agent);
@@ -210,8 +237,26 @@ public class JChatMindFactory {
 
         List<KnowledgeBaseDTO> knowledgeBases = resolveRuntimeKnowledgeBases(agentConfig);
         List<Tool> runtimeTools = resolveRuntimeTools(agentConfig);
-        List<ToolCallback> toolCallbacks = buildToolCallbacks(runtimeTools);
         Set<String> availableToolNames = resolveAvailableToolNames(runtimeTools);
+
+        List<Tool> ragTools = runtimeTools.stream()
+                .filter(tool -> toolSupportsDeclaredName(tool, "KnowledgeTool"))
+                .toList();
+        List<Tool> sqlTools = runtimeTools.stream()
+                .filter(tool -> toolSupportsDeclaredName(tool, "databaseQuery"))
+                .toList();
+        List<Tool> toolTools = runtimeTools.stream()
+                .filter(tool -> !toolSupportsDeclaredName(tool, "KnowledgeTool"))
+                .filter(tool -> !toolSupportsDeclaredName(tool, "databaseQuery"))
+                .toList();
+
+        List<ToolCallback> ragToolCallbacks = buildToolCallbacks(ragTools);
+        List<ToolCallback> sqlToolCallbacks = buildToolCallbacks(sqlTools);
+        List<ToolCallback> toolWorkerCallbacks = buildToolCallbacks(toolTools);
+
+        Set<String> ragToolNames = resolveAvailableToolNames(ragTools);
+        Set<String> sqlToolNames = resolveAvailableToolNames(sqlTools);
+        Set<String> toolWorkerNames = resolveAvailableToolNames(toolTools);
 
         ChatClient chatClient = chatClientRegistry.get(agent.getModel());
         if (Objects.isNull(chatClient)) {
@@ -239,12 +284,21 @@ public class JChatMindFactory {
                         .internalToolExecutionEnabled(false)
                         .build();
 
-        SupervisorNode supervisorNode = new SupervisorNode(chatClient, chatOptions, availableToolNames);
-        WorkerNode workerNode = new WorkerNode(chatClient, chatOptions, toolCallbacks, availableToolNames);
+        Set<String> availableWorkers = new LinkedHashSet<>();
+        availableWorkers.add("RAG_WORKER");
+        availableWorkers.add("SQL_WORKER");
+        availableWorkers.add("TOOL_WORKER");
+
+        SupervisorNode supervisorNode = new SupervisorNode(chatClient, chatOptions, availableToolNames, availableWorkers);
+        RagWorkerNode ragWorkerNode = new RagWorkerNode(chatClient, chatOptions, ragToolCallbacks, ragToolNames);
+        SqlWorkerNode sqlWorkerNode = new SqlWorkerNode(chatClient, chatOptions, sqlToolCallbacks, sqlToolNames);
+        ToolWorkerNode toolWorkerNode = new ToolWorkerNode(chatClient, chatOptions, toolWorkerCallbacks, toolWorkerNames);
 
         GraphEngine engine = new GraphEngine("SUPERVISOR", jChatMind::handleGeneratedMessage);
         engine.addNode(supervisorNode);
-        engine.addNode(workerNode);
+        engine.addNode(ragWorkerNode);
+        engine.addNode(sqlWorkerNode);
+        engine.addNode(toolWorkerNode);
 
         jChatMind.setGraphEngine(engine);
 

@@ -118,17 +118,20 @@ public class DistributedChatMemory implements ChatMemory {
     private List<ChatMessageDTO> convertToDTOs(List<Message> messages) {
         List<ChatMessageDTO> dtos = new ArrayList<>();
         for (Message msg : messages) {
-            if (msg instanceof SystemMessage sysMsg) {
+            if (msg instanceof SystemMessage) {
+                SystemMessage sysMsg = (SystemMessage) msg;
                 dtos.add(ChatMessageDTO.builder()
                         .role(ChatMessageDTO.RoleType.SYSTEM)
                         .content(sysMsg.getText())
                         .build());
-            } else if (msg instanceof UserMessage userMsg) {
+            } else if (msg instanceof UserMessage) {
+                UserMessage userMsg = (UserMessage) msg;
                 dtos.add(ChatMessageDTO.builder()
                         .role(ChatMessageDTO.RoleType.USER)
                         .content(userMsg.getText())
                         .build());
-            } else if (msg instanceof AssistantMessage astMsg) {
+            } else if (msg instanceof AssistantMessage) {
+                AssistantMessage astMsg = (AssistantMessage) msg;
                 dtos.add(ChatMessageDTO.builder()
                         .role(ChatMessageDTO.RoleType.ASSISTANT)
                         .content(astMsg.getText())
@@ -136,7 +139,8 @@ public class DistributedChatMemory implements ChatMemory {
                                 .toolCalls(astMsg.getToolCalls())
                                 .build())
                         .build());
-            } else if (msg instanceof ToolResponseMessage toolMsg) {
+            } else if (msg instanceof ToolResponseMessage) {
+                ToolResponseMessage toolMsg = (ToolResponseMessage) msg;
                 for (ToolResponseMessage.ToolResponse tr : toolMsg.getResponses()) {
                     dtos.add(ChatMessageDTO.builder()
                             .role(ChatMessageDTO.RoleType.TOOL)
@@ -161,21 +165,21 @@ public class DistributedChatMemory implements ChatMemory {
             }
 
             switch (dto.getRole()) {
-                case SYSTEM -> {
+                case SYSTEM:
                     if (!StringUtils.hasLength(dto.getContent())) {
                         continue;
                     }
                     memory.add(new SystemMessage(dto.getContent()));
                     canAppendToolResponse = false;
-                }
-                case USER -> {
+                    break;
+                case USER:
                     if (!StringUtils.hasLength(dto.getContent())) {
                         continue;
                     }
                     memory.add(new UserMessage(dto.getContent()));
                     canAppendToolResponse = false;
-                }
-                case ASSISTANT -> {
+                    break;
+                case ASSISTANT:
                     List<AssistantMessage.ToolCall> toolCalls =
                             dto.getMetadata() == null ? null : dto.getMetadata().getToolCalls();
                     boolean hasText = StringUtils.hasLength(dto.getContent());
@@ -188,8 +192,8 @@ public class DistributedChatMemory implements ChatMemory {
                             .toolCalls(toolCalls)
                             .build());
                     canAppendToolResponse = hasToolCalls;
-                }
-                case TOOL -> {
+                    break;
+                case TOOL:
                     if (!canAppendToolResponse
                             || dto.getMetadata() == null
                             || dto.getMetadata().getToolResponse() == null) {
@@ -199,7 +203,9 @@ public class DistributedChatMemory implements ChatMemory {
                     memory.add(ToolResponseMessage.builder()
                             .responses(List.of(dto.getMetadata().getToolResponse()))
                             .build());
-                }
+                    break;
+                default:
+                    break;
             }
         }
 

@@ -26,7 +26,7 @@ public class GraphEngine {
     public void run(AgentGraphState state) {
         state.setNextNode(entryPoint);
         int steps = 0;
-        int maxSteps = 20;
+        int maxSteps = 40;
 
         log.info("[GraphEngine] ================= Agent graph start =================");
 
@@ -64,8 +64,8 @@ public class GraphEngine {
 
     private void emitIfPresent(Map<String, Object> attrs, String key) {
         Object value = attrs.get(key);
-        if (value instanceof Message message) {
-            onMessageGenerated.accept(message);
+        if (value instanceof Message) {
+            onMessageGenerated.accept((Message) value);
         }
         attrs.remove(key);
     }

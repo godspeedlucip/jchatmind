@@ -53,24 +53,24 @@ public class WorkerNode implements AgentNode {
         state.getAttributes().put("tool_failed", false);
         state.getAttributes().remove("last_tool_error");
         state.getAttributes().remove("worker_candidate_answer");
+        state.getAttributes().remove("last_executed_tool_names");
 
         String toolNames = availableToolNames == null || availableToolNames.isEmpty()
                 ? "(none)"
                 : String.join(", ", availableToolNames);
 
-        String workerPrompt = """
-                You are a worker node.
-
-                Available tool names (exact): %s
-
-                Rules:
-                1) Call tools when needed.
-                2) If no tool is needed, provide plain text only.
-                3) Never output DSML/XML/function-call markup in text.
-                4) Never invent tool names.
-                5) Always prioritize the latest user request over older turns.
-                6) For databaseQuery, do not repeat previous failed SQL; generate SQL that matches the latest user request.
-                """.formatted(toolNames);
+        String workerPrompt = String.format(
+                "You are a worker node.%n%n"
+                        + "Available tool names (exact): %s%n%n"
+                        + "Rules:%n"
+                        + "1) Call tools when needed.%n"
+                        + "2) If no tool is needed, provide plain text only.%n"
+                        + "3) Never output DSML/XML/function-call markup in text.%n"
+                        + "4) Never invent tool names.%n"
+                        + "5) Always prioritize the latest user request over older turns.%n"
+                        + "6) For databaseQuery, do not repeat previous failed SQL; generate SQL that matches the latest user request.%n",
+                toolNames
+        );
 
         Prompt prompt = Prompt.builder()
                 .chatOptions(chatOptions)
@@ -110,14 +110,14 @@ public class WorkerNode implements AgentNode {
             return state;
         }
 
-        state.getMessages().add(output);
-        state.getAttributes().put("latest_tool_call_msg", output);
-
         try {
             log.info("[GraphEngine] WORKER executing tool calls...");
             ToolExecutionResult executionResult = toolCallingManager.executeToolCalls(prompt, response);
 
             List<Message> history = executionResult.conversationHistory();
+            state.getMessages().add(output);
+            state.getAttributes().put("latest_tool_call_msg", output);
+
             ToolResponseMessage toolResponseMsg = (ToolResponseMessage) history.get(history.size() - 1);
 
             state.getMessages().add(toolResponseMsg);
@@ -133,6 +133,8 @@ public class WorkerNode implements AgentNode {
             state.getAttributes().put("tool_failed", true);
             state.getAttributes().put("last_tool_error", error);
             state.getAttributes().put("worker_candidate_answer", error);
+            state.getAttributes().remove("latest_tool_call_msg");
+            state.getAttributes().remove("latest_tool_response_msg");
         }
 
         state.setNextNode("SUPERVISOR");

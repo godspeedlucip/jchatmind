@@ -12,6 +12,8 @@ import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 
+import java.util.List;
+
 @Component
 @AllArgsConstructor
 public class AgentConverter {
@@ -52,8 +54,8 @@ public class AgentConverter {
                 .description(agent.getDescription())
                 .systemPrompt(agent.getSystemPrompt())
                 .model(AgentDTO.ModelType.fromModelName(agent.getModel()))
-                .allowedTools(objectMapper.readValue(agent.getAllowedTools(), new TypeReference<>(){}))
-                .allowedKbs(objectMapper.readValue(agent.getAllowedKbs(), new TypeReference<>(){}))
+                .allowedTools(objectMapper.readValue(agent.getAllowedTools(), new TypeReference<List<String>>() {}))
+                .allowedKbs(objectMapper.readValue(agent.getAllowedKbs(), new TypeReference<List<String>>() {}))
                 .chatOptions(objectMapper.readValue(agent.getChatOptions(), AgentDTO.ChatOptions.class))
                 .createdAt(agent.getCreatedAt())
                 .updatedAt(agent.getUpdatedAt())

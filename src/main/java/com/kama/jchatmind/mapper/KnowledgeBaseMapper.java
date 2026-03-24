@@ -2,6 +2,7 @@ package com.kama.jchatmind.mapper;
 
 import com.kama.jchatmind.model.entity.KnowledgeBase;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
 
@@ -19,7 +20,7 @@ public interface KnowledgeBaseMapper {
 
     List<KnowledgeBase> selectAll();
 
-    List<KnowledgeBase> selectByIdBatch(List<String> ids);
+    List<KnowledgeBase> selectByIdBatch(@Param("ids") List<String> ids);
 
     int deleteById(String id);
 
