@@ -31,10 +31,15 @@ public class SupervisorNode implements AgentNode {
     private static final String ATTR_CURRENT_STEP_ID = "task_current_step_id";
     private static final String ATTR_CURRENT_STEP_DESC = "task_current_step_desc";
     private static final String ATTR_CURRENT_STEP_DOMAIN = "task_current_step_domain";
+    private static final String ATTR_CURRENT_STEP_POLICY = "task_current_step_policy";
+    private static final String ATTR_CURRENT_STEP_ALLOWED_TOOLS = "task_current_step_allowed_tools";
+    private static final String ATTR_POLICY_RETRY_FEEDBACK = "policy_retry_feedback";
     private static final String ATTR_LATEST_STEP_EVIDENCE = "latest_step_evidence";
     private static final String ATTR_STEP_EVIDENCE_BY_ID = "step_evidence_by_id";
     private static final double STRICT_DOMAIN_CONFIDENCE = 0.75d;
     private static final int MAX_SAME_DOMAIN_CORRECTIONS = 1;
+    private static final int MAX_POLICY_VIOLATIONS = 2;
+    private static final int MAX_NORMAL_RETRIES = 2;
     private static final Pattern EMAIL_PATTERN = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
 
     private static final String[] CN_DB = {
@@ -60,6 +65,8 @@ public class SupervisorNode implements AgentNode {
     @SuppressWarnings("unused")
     private final Set<String> availableToolNames;
     private final Set<String> availableWorkerNames;
+    private final ToolPolicyResolver policyResolver;
+    private final StepEvaluator stepEvaluator;
 
     public SupervisorNode(ChatClient chatClient,
                           ChatOptions chatOptions,
@@ -69,6 +76,8 @@ public class SupervisorNode implements AgentNode {
         this.chatOptions = chatOptions;
         this.availableToolNames = availableToolNames;
         this.availableWorkerNames = availableWorkerNames;
+        this.policyResolver = new ToolPolicyResolver();
+        this.stepEvaluator = new StepEvaluator(policyResolver);
     }
 
     @Override
@@ -117,11 +126,14 @@ public class SupervisorNode implements AgentNode {
             }
 
             next.markRunning(candidate);
+            ToolPolicy policy = resolvePolicy(next);
             log.info("[GraphEngine] Step dispatch: id={}, worker={}, attempt={}, effectiveExecuted={}, desc={}",
                     next.getId(), candidate, next.getAttemptCount(), next.isEffectiveExecuted(), clip(next.getDescription(), 80));
             state.getAttributes().put(ATTR_CURRENT_STEP_ID, next.getId());
             state.getAttributes().put(ATTR_CURRENT_STEP_DESC, next.getDescription());
             state.getAttributes().put(ATTR_CURRENT_STEP_DOMAIN, next.getDomain() == null ? "" : next.getDomain().name());
+            state.getAttributes().put(ATTR_CURRENT_STEP_POLICY, policy);
+            state.getAttributes().put(ATTR_CURRENT_STEP_ALLOWED_TOOLS, new ArrayList<String>(policy.getAllowedTools()));
             state.getAttributes().put("route_reason", buildRouteReason(next));
             state.getAttributes().put("worker_hops", getIntAttr(state, "worker_hops", 0) + 1);
             state.setNextNode(candidate);
@@ -136,77 +148,76 @@ public class SupervisorNode implements AgentNode {
         }
 
         StepEvidence evidence = getEvidenceForStep(state, running);
+        ToolPolicy policy = resolvePolicy(running, state);
         boolean toolFailed = getBooleanAttr(state, "tool_failed", false);
-        String workerCandidateAnswer = getStringAttr(state, "worker_candidate_answer");
-        String latestToolText = latestToolResponseTextInCurrentTurn(state);
-        if (isBlank(workerCandidateAnswer) && evidence != null) {
-            workerCandidateAnswer = evidence.getTextAnswer();
+        String lastToolError = getStringAttr(state, "last_tool_error");
+        StepEvaluationResult evaluation = stepEvaluator.evaluate(running, evidence, policy, toolFailed, lastToolError);
+        if (evidence != null) {
+            evidence.setEvaluatorDecision(evaluation.getDecision().name());
         }
-        if (isBlank(latestToolText) && evidence != null && !evidence.getToolResults().isEmpty()) {
-            latestToolText = String.join("\n", evidence.getToolResults());
+        log.info("[GraphEngine] Step evaluate: id={}, decision={}, policy={}, reason={}",
+                running.getId(), evaluation.getDecision(), policy.getPolicyName(), clip(evaluation.getReason(), 160));
+
+        if (evaluation.getDecision() == StepDecision.PASS) {
+            running.markEffectiveExecuted();
+            running.markSuccess(clip(normalizeToolText(evaluation.getResultSummary()), 800));
+            clearCurrentStepContext(state);
+            clearExecutionAttrs(state);
+            return;
         }
 
-        if (toolFailed) {
-            String error = getStringAttr(state, "last_tool_error");
-            if (isBlank(error) && evidence != null) {
-                error = evidence.getError();
-            }
-            if (isBlank(error)) {
-                error = "Unknown tool execution failure.";
-            }
-            state.getAttributes().put("tool_failed", false);
-            if (isInvalidAttemptError(error)) {
-                tryFallbackWithoutFail(running, state, error);
+        if (evaluation.getDecision() == StepDecision.RETRY_SAME_WORKER) {
+            if (evaluation.isPolicyViolation()) {
+                String reason = normalizePolicyViolationReason(evaluation.getReason());
+                if (running.canRetryPolicyViolation(MAX_POLICY_VIOLATIONS)) {
+                    running.markPolicyViolationForRetry(
+                            clip(reason, 200),
+                            "Stay on current worker and call only allowed tools: " + String.join(", ", policy.allowedToolList())
+                    );
+                    state.getAttributes().put(
+                            ATTR_POLICY_RETRY_FEEDBACK,
+                            "Last attempt violated step policy: " + clip(reason, 220)
+                                    + ". You MUST call only: " + String.join(", ", policy.allowedToolList())
+                    );
+                    clearExecutionAttrs(state);
+                    return;
+                }
+                tryFallbackWorkerOrFail(running, state, "Policy retries exhausted. " + reason);
                 if (running.isTerminal()) {
                     clearCurrentStepContext(state);
+                    clearExecutionAttrs(state);
                 }
                 return;
             }
-            tryFallbackWorkerOrFail(running, state, error);
+            if (running.getNormalAttemptCount() < MAX_NORMAL_RETRIES) {
+                running.markPendingForRetry(clip(evaluation.getReason(), 200));
+                clearExecutionAttrs(state);
+                return;
+            }
+            tryFallbackWorkerOrFail(running, state, "Retries exhausted. " + evaluation.getReason());
             if (running.isTerminal()) {
                 clearCurrentStepContext(state);
             }
+            clearExecutionAttrs(state);
             return;
         }
 
-        if (!isBlank(latestToolText)) {
-            if (!isStepOutputAcceptable(running, state, evidence)) {
-                if (trySameDomainCorrection(running, state, "Tool output did not satisfy step intent.")) {
-                    return;
-                }
-                tryFallbackWorkerOrFail(running, state, "Output did not satisfy step intent.");
+        if (evaluation.getDecision() == StepDecision.RECLASSIFY) {
+            if (!tryReclassifyDomain(running, state, evaluation.getReason())) {
+                tryFallbackWorkerOrFail(running, state, evaluation.getReason());
                 if (running.isTerminal()) {
                     clearCurrentStepContext(state);
                 }
-                return;
             }
-            running.markEffectiveExecuted();
-            running.markSuccess(clip(normalizeToolText(latestToolText), 800));
-            clearCurrentStepContext(state);
+            clearExecutionAttrs(state);
             return;
         }
 
-        if (!isBlank(workerCandidateAnswer)) {
-            if (!isTextOnlyOutputAcceptable(running)) {
-                if (trySameDomainCorrection(running, state, "Text-only output is not accepted for this step.")) {
-                    return;
-                }
-                tryFallbackWithoutFail(running, state, "Text-only output is not accepted for this step.");
-                if (running.isTerminal()) {
-                    clearCurrentStepContext(state);
-                }
-                return;
-            }
-            running.markEffectiveExecuted();
-            running.markSuccess(clip(workerCandidateAnswer, 800));
-            clearCurrentStepContext(state);
-            return;
-        }
-
-        tryFallbackWorkerOrFail(running, state, "Worker returned no usable output.");
+        markStepFailedIfExecuted(running, evaluation.getReason());
         if (running.isTerminal()) {
             clearCurrentStepContext(state);
         }
+        clearExecutionAttrs(state);
     }
 
     private void tryFallbackWorkerOrFail(TaskStep step, AgentGraphState state, String error) {
@@ -387,6 +398,7 @@ public class SupervisorNode implements AgentNode {
     }
 
     private String buildRouteReason(TaskStep step) {
+        ToolPolicy policy = resolvePolicy(step);
         StringBuilder reason = new StringBuilder();
         reason.append("Task: ").append(step.getDescription());
         reason.append(". Domain confidence: ").append(formatConfidence(step.getDomainConfidence())).append(".");
@@ -402,6 +414,12 @@ public class SupervisorNode implements AgentNode {
         }
         if (!isBlank(step.getRetryHint())) {
             reason.append(". Retry guidance: ").append(step.getRetryHint());
+        }
+        if (policy != null) {
+            reason.append(". Policy: ").append(policy.getPolicyName());
+            if (!policy.getAllowedTools().isEmpty()) {
+                reason.append(". Allowed tools: ").append(String.join(", ", policy.allowedToolList()));
+            }
         }
         return reason.toString();
     }
@@ -740,66 +758,114 @@ public class SupervisorNode implements AgentNode {
     }
 
     private String buildFinalSummary(TaskPlan plan) {
-        StringBuilder success = new StringBuilder();
-        StringBuilder failed = new StringBuilder();
-        StringBuilder unresolved = new StringBuilder();
-        StringBuilder skipped = new StringBuilder();
         int successCount = 0;
         int failedCount = 0;
         int unresolvedCount = 0;
         int skippedCount = 0;
-        int index = 1;
         for (TaskStep step : plan.getSteps()) {
             if (step.getStatus() == TaskStepStatus.SUCCESS) {
                 successCount++;
-                success.append(index).append(". ")
-                        .append(step.getDescription()).append("\n")
-                        .append("   结果: ").append(formatStepResult(step.getResultSummary())).append("\n");
-            } else if (step.getStatus() == TaskStepStatus.FAILED) {
+                continue;
+            }
+            if (step.getStatus() == TaskStepStatus.FAILED) {
                 failedCount++;
-                failed.append(index).append(". ")
-                        .append(step.getDescription()).append("\n")
-                        .append("   原因: ").append(formatFailureReason(step.getErrorSummary())).append("\n");
-            } else if (step.getStatus() == TaskStepStatus.SKIPPED) {
-                if (step.getAttemptCount() > 0) {
+                continue;
+            }
+            if (step.getStatus() == TaskStepStatus.SKIPPED) {
+                if (step.getNormalAttemptCount() > 0 || step.getPolicyViolationCount() > 0) {
                     unresolvedCount++;
-                    unresolved.append(index).append(". ")
-                            .append(step.getDescription()).append("\n")
-                            .append("   原因: ").append(formatFailureReason(step.getErrorSummary())).append("\n");
                 } else {
                     skippedCount++;
-                    skipped.append(index).append(". ")
-                            .append(step.getDescription()).append("\n")
-                            .append("   原因: ").append(formatFailureReason(step.getErrorSummary())).append("\n");
                 }
             }
-            index++;
         }
-        if (success.length() == 0 && failed.length() == 0 && unresolved.length() == 0 && skipped.length() == 0) {
+        if (plan.getSteps() == null || plan.getSteps().isEmpty()) {
             return "Workflow finished, but no task output was produced.";
         }
 
         StringBuilder out = new StringBuilder();
-        out.append("Workflow Summary\n")
-                .append("- Total Steps: ").append(plan.getSteps().size()).append("\n")
-                .append("- Succeeded: ").append(successCount).append("\n")
-                .append("- Failed: ").append(failedCount).append("\n")
-                .append("- Unresolved: ").append(unresolvedCount).append("\n")
-                .append("- Skipped: ").append(skippedCount).append("\n\n");
+        out.append("任务执行结果概览\n\n")
+                .append("本次工作一共包含 ").append(plan.getSteps().size()).append(" 个步骤：\n")
+                .append("已成功完成：").append(successCount).append(" 个\n")
+                .append("失败：").append(failedCount).append(" 个\n")
+                .append("未解决：").append(unresolvedCount).append(" 个\n")
+                .append("已跳过：").append(skippedCount).append(" 个\n\n")
+                .append("各步骤执行情况\n");
 
-        if (success.length() > 0) {
-            out.append("Succeeded:\n").append(success);
-        }
-        if (failed.length() > 0) {
-            out.append("\nFailed:\n").append(failed);
-        }
-        if (unresolved.length() > 0) {
-            out.append("\nUnresolved:\n").append(unresolved);
-        }
-        if (skipped.length() > 0) {
-            out.append("\nSkipped:\n").append(skipped);
+        int index = 1;
+        for (TaskStep step : plan.getSteps()) {
+            String statusLabel = summarizeStepStatus(step);
+            out.append(index).append(". ").append(step.getDescription()).append("\n\n")
+                    .append("结果：").append(statusLabel).append("\n");
+            if (step.getStatus() == TaskStepStatus.SUCCESS) {
+                out.append("输出：").append(formatStepResult(step.getResultSummary())).append("\n");
+                String hint = qualityHint(step);
+                if (!isBlank(hint)) {
+                    out.append("质量提示：").append(hint).append("\n");
+                }
+            } else {
+                out.append("原因：").append(formatFailureReason(step.getErrorSummary())).append("\n");
+            }
+            if (step.getPolicyViolationCount() > 0) {
+                out.append("策略违规次数：").append(step.getPolicyViolationCount()).append("\n");
+            }
+            if (step.getNormalAttemptCount() > 0) {
+                out.append("尝试次数：").append(step.getNormalAttemptCount()).append(" 次\n");
+            }
+            out.append("\n");
+            index++;
         }
         return out.toString().trim();
+    }
+
+    private String summarizeStepStatus(TaskStep step) {
+        if (step == null) {
+            return "未知";
+        }
+        if (step.getStatus() == TaskStepStatus.SUCCESS) {
+            return "成功";
+        }
+        if (step.getStatus() == TaskStepStatus.FAILED) {
+            return "失败";
+        }
+        if (step.getStatus() == TaskStepStatus.SKIPPED) {
+            if (step.getNormalAttemptCount() > 0 || step.getPolicyViolationCount() > 0) {
+                return "未解决";
+            }
+            return "已跳过";
+        }
+        return step.getStatus().name();
+    }
+
+    private String qualityHint(TaskStep step) {
+        if (step == null || step.getStatus() != TaskStepStatus.SUCCESS) {
+            return "";
+        }
+        String desc = step.getDescription() == null ? "" : step.getDescription();
+        String descLower = desc.toLowerCase(Locale.ROOT);
+        String result = step.getResultSummary() == null ? "" : step.getResultSummary();
+        String resultLower = result.toLowerCase(Locale.ROOT);
+
+        if (containsAny(descLower, "价格", "price", "报价")) {
+            boolean hasPriceSignal = containsAny(resultLower, "price", "价格", "￥", "¥", "元")
+                    || result.matches(".*\\d+\\s*(元|rmb|cny|usd).*");
+            if (!hasPriceSignal) {
+                return "该步骤虽然标记为成功，但返回内容里缺少明确价格信息，建议人工复核。";
+            }
+        }
+        if (containsAny(descLower, "天气", "weather")) {
+            boolean hasWeatherSignal = containsAny(resultLower, "weather", "天气", "温度", "湿度", "forecast");
+            if (!hasWeatherSignal) {
+                return "该步骤虽然标记为成功，但返回内容不像天气结果，建议人工复核。";
+            }
+        }
+        if (containsAny(descLower, "发送", "email", "邮件")) {
+            boolean emailSent = containsAny(resultLower, "sendemail", "已提交发送", "sent", "success", "发送");
+            if (!emailSent) {
+                return "该步骤虽然标记为成功，但没有看到明确发送成功信号，建议人工复核。";
+            }
+        }
+        return "";
     }
 
     private String formatStepResult(String raw) {
@@ -816,23 +882,26 @@ public class SupervisorNode implements AgentNode {
 
     private String formatFailureReason(String raw) {
         if (isBlank(raw)) {
-            return "No executable worker/tool could complete this step.";
+            return "没有可执行的 worker/tool 能完成该步骤。";
         }
         String lower = raw.toLowerCase(Locale.ROOT);
         if (lower.contains("missed required weather capability")) {
-            return "Tool selection missed weather capability (e.g. called date tool only).";
+            return "工具选择缺少天气能力（例如只调用了日期工具）。";
         }
         if (lower.contains("missed required email capability")) {
-            return "Tool selection missed email sending capability.";
+            return "工具选择缺少邮件发送能力。";
         }
         if (lower.contains("output did not satisfy step intent")) {
-            return "Worker produced output, but it did not satisfy this step's required action.";
+            return "worker 虽有输出，但没有满足该步骤要求。";
         }
         if (lower.contains("domain reclassified")) {
             return clip(raw.replace("\r", " ").replace("\n", " ").trim(), 220);
         }
         if (lower.contains("not compatible with domain") || lower.contains("cannot call tool")) {
-            return "Routing fallback exhausted: candidate workers were not compatible with required tools.";
+            return "路由回退已耗尽：候选 worker 与所需工具不兼容。";
+        }
+        if (lower.contains("policy violation")) {
+            return "策略校验重试次数已耗尽，仍未得到合规执行。";
         }
         return clip(raw.replace("\r", " ").replace("\n", " ").trim(), 220);
     }
@@ -854,6 +923,50 @@ public class SupervisorNode implements AgentNode {
         state.getAttributes().remove(ATTR_CURRENT_STEP_ID);
         state.getAttributes().remove(ATTR_CURRENT_STEP_DESC);
         state.getAttributes().remove(ATTR_CURRENT_STEP_DOMAIN);
+        state.getAttributes().remove(ATTR_CURRENT_STEP_POLICY);
+        state.getAttributes().remove(ATTR_CURRENT_STEP_ALLOWED_TOOLS);
+        state.getAttributes().remove(ATTR_POLICY_RETRY_FEEDBACK);
+    }
+
+    private void clearExecutionAttrs(AgentGraphState state) {
+        if (state == null) {
+            return;
+        }
+        state.getAttributes().put("tool_failed", false);
+        state.getAttributes().remove("last_tool_error");
+        state.getAttributes().remove("worker_candidate_answer");
+        state.getAttributes().remove("last_executed_tool_names");
+        state.getAttributes().remove("latest_tool_call_msg");
+        state.getAttributes().remove("latest_tool_response_msg");
+    }
+
+    private String normalizePolicyViolationReason(String reason) {
+        if (reason == null) {
+            return "Policy violation.";
+        }
+        String text = reason.trim();
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("policy violation:")) {
+            return text.substring("policy violation:".length()).trim();
+        }
+        return text;
+    }
+
+    private ToolPolicy resolvePolicy(TaskStep step) {
+        return policyResolver.resolve(step);
+    }
+
+    private ToolPolicy resolvePolicy(TaskStep step, AgentGraphState state) {
+        Object policy = state == null ? null : state.getAttributes().get(ATTR_CURRENT_STEP_POLICY);
+        if (policy instanceof ToolPolicy) {
+            return (ToolPolicy) policy;
+        }
+        ToolPolicy resolved = resolvePolicy(step);
+        if (state != null) {
+            state.getAttributes().put(ATTR_CURRENT_STEP_POLICY, resolved);
+            state.getAttributes().put(ATTR_CURRENT_STEP_ALLOWED_TOOLS, new ArrayList<String>(resolved.getAllowedTools()));
+        }
+        return resolved;
     }
 
     private TaskStep getRunningStep(AgentGraphState state, TaskPlan plan) {

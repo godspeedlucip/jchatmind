@@ -20,7 +20,9 @@ public class TaskStep {
     private boolean executed;
     private boolean effectiveExecuted;
     private int attemptCount;
+    private int normalAttemptCount;
     private int sameDomainCorrectionCount;
+    private int policyViolationCount;
     private boolean domainReclassified;
     private String retryHint;
     private String transitionReason;
@@ -54,7 +56,9 @@ public class TaskStep {
         this.executed = false;
         this.effectiveExecuted = false;
         this.attemptCount = 0;
+        this.normalAttemptCount = 0;
         this.sameDomainCorrectionCount = 0;
+        this.policyViolationCount = 0;
         this.domainReclassified = false;
         this.retryHint = "";
         this.transitionReason = "";
@@ -110,8 +114,16 @@ public class TaskStep {
         return attemptCount;
     }
 
+    public int getNormalAttemptCount() {
+        return normalAttemptCount;
+    }
+
     public int getSameDomainCorrectionCount() {
         return sameDomainCorrectionCount;
+    }
+
+    public int getPolicyViolationCount() {
+        return policyViolationCount;
     }
 
     public boolean isDomainReclassified() {
@@ -167,6 +179,7 @@ public class TaskStep {
         this.assignedWorker = worker == null ? "" : worker;
         this.executed = true;
         this.attemptCount++;
+        this.normalAttemptCount++;
         this.retryHint = "";
         transitionTo(TaskStepStatus.RUNNING, "Dispatched to worker: " + this.assignedWorker);
     }
@@ -186,6 +199,20 @@ public class TaskStep {
         this.retryHint = hint == null ? "" : hint;
         this.sameDomainCorrectionCount++;
         transitionTo(TaskStepStatus.RETRY_PENDING, this.errorSummary);
+    }
+
+    public void markPolicyViolationForRetry(String reason, String hint) {
+        this.errorSummary = reason == null ? "" : reason;
+        this.retryHint = hint == null ? "" : hint;
+        this.policyViolationCount++;
+        if (this.normalAttemptCount > 0) {
+            this.normalAttemptCount--;
+        }
+        transitionTo(TaskStepStatus.RETRY_PENDING, this.errorSummary);
+    }
+
+    public boolean canRetryPolicyViolation(int maxViolations) {
+        return policyViolationCount < Math.max(0, maxViolations);
     }
 
     public boolean canRetrySameDomainCorrection(int maxCorrections) {

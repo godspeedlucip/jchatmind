@@ -19,6 +19,12 @@ public class StepEvidence {
     private double confidence;
     private boolean toolExecutionAttempted;
     private boolean toolExecutionSucceeded;
+    private boolean policyViolation;
+    private String policyCheckResult;
+    private boolean requiredSatisfied;
+    private boolean forbiddenTriggered;
+    private boolean sideEffectObserved;
+    private String evaluatorDecision;
     private final long createdAtEpochMs;
     private long updatedAtEpochMs;
 
@@ -29,6 +35,12 @@ public class StepEvidence {
         this.confidence = 0.0d;
         this.textAnswer = "";
         this.error = "";
+        this.policyViolation = false;
+        this.policyCheckResult = "";
+        this.requiredSatisfied = false;
+        this.forbiddenTriggered = false;
+        this.sideEffectObserved = false;
+        this.evaluatorDecision = "";
     }
 
     public String getStepId() {
@@ -184,6 +196,60 @@ public class StepEvidence {
 
     public void setToolExecutionSucceeded(boolean toolExecutionSucceeded) {
         this.toolExecutionSucceeded = toolExecutionSucceeded;
+        touch();
+    }
+
+    public boolean isPolicyViolation() {
+        return policyViolation;
+    }
+
+    public void setPolicyViolation(boolean policyViolation) {
+        this.policyViolation = policyViolation;
+        touch();
+    }
+
+    public String getPolicyCheckResult() {
+        return policyCheckResult;
+    }
+
+    public void setPolicyCheckResult(String policyCheckResult) {
+        this.policyCheckResult = safe(policyCheckResult);
+        touch();
+    }
+
+    public boolean isRequiredSatisfied() {
+        return requiredSatisfied;
+    }
+
+    public void setRequiredSatisfied(boolean requiredSatisfied) {
+        this.requiredSatisfied = requiredSatisfied;
+        touch();
+    }
+
+    public boolean isForbiddenTriggered() {
+        return forbiddenTriggered;
+    }
+
+    public void setForbiddenTriggered(boolean forbiddenTriggered) {
+        this.forbiddenTriggered = forbiddenTriggered;
+        touch();
+    }
+
+    public boolean isSideEffectObserved() {
+        return sideEffectObserved;
+    }
+
+    public void setSideEffectObserved(boolean sideEffectObserved) {
+        this.sideEffectObserved = sideEffectObserved;
+        touch();
+    }
+
+    public String getEvaluatorDecision() {
+        return evaluatorDecision;
+    }
+
+    public void setEvaluatorDecision(String evaluatorDecision) {
+        this.evaluatorDecision = safe(evaluatorDecision);
         touch();
     }
 
