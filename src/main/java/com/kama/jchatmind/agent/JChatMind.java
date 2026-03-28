@@ -153,18 +153,84 @@ public class JChatMind {
     private void refreshPendingMessages() {
         for (ChatMessageDTO message : pendingChatMessages) {
             ChatMessageVO vo = chatMessageConverter.toVO(message);
-            SseMessage sseMessage = SseMessage.builder()
-                    .type(SseMessage.Type.AI_GENERATED_CONTENT)
-                    .payload(SseMessage.Payload.builder()
-                            .message(vo)
-                            .build())
-                    .metadata(SseMessage.Metadata.builder()
-                            .chatMessageId(message.getId())
-                            .build())
-                    .build();
-            sseService.send(this.chatSessionId, sseMessage);
+            String chatMessageId = StringUtils.hasLength(message.getId())
+                    ? message.getId()
+                    : vo.getId();
+            sendGeneratedContentMessage(vo, chatMessageId);
         }
         pendingChatMessages.clear();
+    }
+
+    private void sendGeneratedContentMessage(ChatMessageVO vo, String chatMessageId) {
+        SseMessage sseMessage = SseMessage.builder()
+                .type(SseMessage.Type.AI_GENERATED_CONTENT)
+                .payload(SseMessage.Payload.builder()
+                        .message(vo)
+                        .build())
+                .metadata(SseMessage.Metadata.builder()
+                        .chatMessageId(chatMessageId)
+                        .build())
+                .build();
+        sseService.send(this.chatSessionId, sseMessage);
+    }
+
+    public String startAssistantStream() {
+        ChatMessageDTO streamMessageDTO = ChatMessageDTO.builder()
+                .role(ChatMessageDTO.RoleType.ASSISTANT)
+                .content("")
+                .sessionId(this.chatSessionId)
+                .metadata(ChatMessageDTO.MetaData.builder().build())
+                .build();
+        CreateChatMessageResponse response = chatMessageFacadeService.createChatMessage(streamMessageDTO);
+        streamMessageDTO.setId(response.getChatMessageId());
+
+        ChatMessageVO vo = chatMessageConverter.toVO(streamMessageDTO);
+        SseMessage startEvent = SseMessage.builder()
+                .type(SseMessage.Type.AI_GENERATED_CONTENT_START)
+                .payload(SseMessage.Payload.builder()
+                        .message(vo)
+                        .build())
+                .metadata(SseMessage.Metadata.builder()
+                        .chatMessageId(vo.getId())
+                        .build())
+                .build();
+        sseService.send(this.chatSessionId, startEvent);
+        return vo.getId();
+    }
+
+    public void appendAssistantStream(String messageId, String deltaContent) {
+        if (!StringUtils.hasLength(messageId) || !StringUtils.hasLength(deltaContent)) {
+            return;
+        }
+
+        chatMessageFacadeService.appendChatMessage(messageId, deltaContent);
+
+        SseMessage deltaEvent = SseMessage.builder()
+                .type(SseMessage.Type.AI_GENERATED_CONTENT_DELTA)
+                .payload(SseMessage.Payload.builder()
+                        .deltaContent(deltaContent)
+                        .build())
+                .metadata(SseMessage.Metadata.builder()
+                        .chatMessageId(messageId)
+                        .build())
+                .build();
+        sseService.send(this.chatSessionId, deltaEvent);
+    }
+
+    public void finishAssistantStream(String messageId) {
+        if (!StringUtils.hasLength(messageId)) {
+            return;
+        }
+        SseMessage endEvent = SseMessage.builder()
+                .type(SseMessage.Type.AI_GENERATED_CONTENT_END)
+                .payload(SseMessage.Payload.builder()
+                        .done(Boolean.TRUE)
+                        .build())
+                .metadata(SseMessage.Metadata.builder()
+                        .chatMessageId(messageId)
+                        .build())
+                .build();
+        sseService.send(this.chatSessionId, endEvent);
     }
 
     public void run() {

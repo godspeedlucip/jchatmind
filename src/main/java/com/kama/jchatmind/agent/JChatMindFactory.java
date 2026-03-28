@@ -5,6 +5,7 @@ import com.kama.jchatmind.agent.graph.GraphEngine;
 import com.kama.jchatmind.agent.graph.RagWorkerNode;
 import com.kama.jchatmind.agent.graph.SqlWorkerNode;
 import com.kama.jchatmind.agent.graph.SupervisorNode;
+import com.kama.jchatmind.agent.graph.TokenStreamPublisher;
 import com.kama.jchatmind.agent.graph.ToolWorkerNode;
 import com.kama.jchatmind.agent.tools.Tool;
 import com.kama.jchatmind.config.ChatClientRegistry;
@@ -149,6 +150,18 @@ public class JChatMindFactory {
         return runtimeTools;
     }
 
+    private List<Tool> disableKnowledgeToolIfNoKb(
+            List<Tool> runtimeTools,
+            List<KnowledgeBaseDTO> knowledgeBases
+    ) {
+        if (knowledgeBases != null && !knowledgeBases.isEmpty()) {
+            return runtimeTools;
+        }
+        return runtimeTools.stream()
+                .filter(tool -> !toolSupportsDeclaredName(tool, "KnowledgeTool"))
+                .toList();
+    }
+
     private List<ToolCallback> buildToolCallbacks(List<Tool> runtimeTools) {
         List<ToolCallback> callbacks = new ArrayList<>();
         for (Tool tool : runtimeTools) {
@@ -237,6 +250,7 @@ public class JChatMindFactory {
 
         List<KnowledgeBaseDTO> knowledgeBases = resolveRuntimeKnowledgeBases(agentConfig);
         List<Tool> runtimeTools = resolveRuntimeTools(agentConfig);
+        runtimeTools = disableKnowledgeToolIfNoKb(runtimeTools, knowledgeBases);
         Set<String> availableToolNames = resolveAvailableToolNames(runtimeTools);
 
         List<Tool> ragTools = runtimeTools.stream()
@@ -263,6 +277,10 @@ public class JChatMindFactory {
             throw new IllegalStateException("Cannot find ChatClient for model: " + agent.getModel());
         }
 
+        RagService ragServiceForAgent = (knowledgeBases == null || knowledgeBases.isEmpty())
+                ? null
+                : ragService;
+
         JChatMind jChatMind = new JChatMind(
                 agent.getId(),
                 agent.getName(),
@@ -276,7 +294,7 @@ public class JChatMindFactory {
                 null,
                 memorySummarizationService,
                 chatClient,
-                ragService
+                ragServiceForAgent
         );
 
         org.springframework.ai.chat.prompt.ChatOptions chatOptions =
@@ -290,9 +308,25 @@ public class JChatMindFactory {
         availableWorkers.add("TOOL_WORKER");
 
         SupervisorNode supervisorNode = new SupervisorNode(chatClient, chatOptions, availableToolNames, availableWorkers);
-        RagWorkerNode ragWorkerNode = new RagWorkerNode(chatClient, chatOptions, ragToolCallbacks, ragToolNames);
-        SqlWorkerNode sqlWorkerNode = new SqlWorkerNode(chatClient, chatOptions, sqlToolCallbacks, sqlToolNames);
-        ToolWorkerNode toolWorkerNode = new ToolWorkerNode(chatClient, chatOptions, toolWorkerCallbacks, toolWorkerNames);
+        TokenStreamPublisher tokenStreamPublisher = new TokenStreamPublisher() {
+            @Override
+            public String startAssistantStream() {
+                return jChatMind.startAssistantStream();
+            }
+
+            @Override
+            public void appendAssistantStream(String messageId, String deltaContent) {
+                jChatMind.appendAssistantStream(messageId, deltaContent);
+            }
+
+            @Override
+            public void finishAssistantStream(String messageId) {
+                jChatMind.finishAssistantStream(messageId);
+            }
+        };
+        RagWorkerNode ragWorkerNode = new RagWorkerNode(chatClient, chatOptions, ragToolCallbacks, ragToolNames, tokenStreamPublisher);
+        SqlWorkerNode sqlWorkerNode = new SqlWorkerNode(chatClient, chatOptions, sqlToolCallbacks, sqlToolNames, tokenStreamPublisher);
+        ToolWorkerNode toolWorkerNode = new ToolWorkerNode(chatClient, chatOptions, toolWorkerCallbacks, toolWorkerNames, tokenStreamPublisher);
 
         GraphEngine engine = new GraphEngine("SUPERVISOR", jChatMind::handleGeneratedMessage);
         engine.addNode(supervisorNode);

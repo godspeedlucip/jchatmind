@@ -12,8 +12,9 @@ public class RagWorkerNode extends AbstractWorkerNode {
     public RagWorkerNode(ChatClient chatClient,
                          ChatOptions chatOptions,
                          List<ToolCallback> tools,
-                         Set<String> availableToolNames) {
-        super(chatClient, chatOptions, tools, availableToolNames);
+                         Set<String> availableToolNames,
+                         TokenStreamPublisher tokenStreamPublisher) {
+        super(chatClient, chatOptions, tools, availableToolNames, tokenStreamPublisher);
     }
 
     @Override
@@ -21,4 +22,3 @@ public class RagWorkerNode extends AbstractWorkerNode {
         return "RAG_WORKER";
     }
 }
-

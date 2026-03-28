@@ -14,6 +14,7 @@ import com.kama.jchatmind.model.response.GetChatMessagesResponse;
 import com.kama.jchatmind.model.vo.ChatMessageVO;
 import com.kama.jchatmind.service.ChatMessageFacadeService;
 import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ import java.util.List;
 
 @Service
 @AllArgsConstructor
+@Slf4j
 public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
 
     private static final String CHAT_MEMORY_KEY_PREFIX = "chat:memory:";
@@ -73,7 +75,17 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
 
         // Ensure next run reads latest user input from DB instead of stale Redis cache.
         if (request.getRole() == ChatMessageDTO.RoleType.USER) {
-            redisTemplate.delete(CHAT_MEMORY_KEY_PREFIX + request.getSessionId());
+            try {
+                redisTemplate.unlink(CHAT_MEMORY_KEY_PREFIX + request.getSessionId());
+            } catch (RuntimeException ex) {
+                try {
+                    redisTemplate.delete(CHAT_MEMORY_KEY_PREFIX + request.getSessionId());
+                } catch (RuntimeException ex2) {
+                    // Cache invalidation failure should not block user message creation.
+                    log.warn("Skip Redis cache invalidation due to runtime exception, sessionId={}, error={}",
+                            request.getSessionId(), ex2.getMessage());
+                }
+            }
         }
 
         publisher.publishEvent(new ChatEvent(

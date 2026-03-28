@@ -19,6 +19,7 @@ public class SseMessage {
     @Builder
     public static class Payload {
         private ChatMessageVO message;
+        private String deltaContent;
         private String statusText;
         private Boolean done;
     }
@@ -38,6 +39,9 @@ public class SseMessage {
     // 5. AI 完成
     public enum Type {
         AI_GENERATED_CONTENT,
+        AI_GENERATED_CONTENT_START,
+        AI_GENERATED_CONTENT_DELTA,
+        AI_GENERATED_CONTENT_END,
         AI_PLANNING,
         AI_THINKING,
         AI_EXECUTING,

@@ -41,16 +41,19 @@ public abstract class AbstractWorkerNode implements AgentNode {
     private final List<ToolCallback> tools;
     private final ToolCallingManager toolCallingManager;
     private final Set<String> availableToolNames;
+    private final TokenStreamPublisher tokenStreamPublisher;
 
     protected AbstractWorkerNode(ChatClient chatClient,
                                  ChatOptions chatOptions,
                                  List<ToolCallback> tools,
-                                 Set<String> availableToolNames) {
+                                 Set<String> availableToolNames,
+                                 TokenStreamPublisher tokenStreamPublisher) {
         this.chatClient = chatClient;
         this.chatOptions = chatOptions;
         this.tools = tools;
         this.availableToolNames = availableToolNames;
         this.toolCallingManager = ToolCallingManager.builder().build();
+        this.tokenStreamPublisher = tokenStreamPublisher;
     }
 
     @Override
@@ -98,16 +101,27 @@ public abstract class AbstractWorkerNode implements AgentNode {
                 .messages(state.getMessages())
                 .build();
 
-        ChatResponse response = chatClient.prompt(prompt)
-                .system(workerPrompt)
-                .toolCallbacks(callbacksForStep)
-                .call()
-                .chatClientResponse()
-                .chatResponse();
+        boolean useTokenStream = shouldUseTokenStream(callbacksForStep);
+        StreamExecutionResult streamExecutionResult = null;
+        ChatResponse response;
+        if (useTokenStream) {
+            streamExecutionResult = streamPrompt(prompt, workerPrompt, callbacksForStep);
+            response = streamExecutionResult.chatResponse;
+        } else {
+            response = chatClient.prompt(prompt)
+                    .system(workerPrompt)
+                    .toolCallbacks(callbacksForStep)
+                    .call()
+                    .chatClientResponse()
+                    .chatResponse();
+        }
 
         AssistantMessage output = response.getResult().getOutput();
         List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
         String outputText = output.getText() == null ? "" : output.getText().trim();
+        if (streamExecutionResult != null && !streamExecutionResult.streamedText.isBlank()) {
+            outputText = streamExecutionResult.streamedText;
+        }
 
         if (toolCalls == null || toolCalls.isEmpty()) {
             String workerText;
@@ -500,6 +514,118 @@ public abstract class AbstractWorkerNode implements AgentNode {
             }
         }
         return out;
+    }
+
+    private boolean shouldUseTokenStream(ToolCallback[] callbacksForStep) {
+        return tokenStreamPublisher != null
+                && callbacksForStep != null
+                && callbacksForStep.length == 0;
+    }
+
+    private StreamExecutionResult streamPrompt(
+            Prompt prompt,
+            String workerPrompt,
+            ToolCallback[] callbacksForStep
+    ) {
+        String streamMessageId = tokenStreamPublisher.startAssistantStream();
+        StringBuilder streamedText = new StringBuilder();
+        ChatResponse lastChatResponse = null;
+
+        try {
+            Iterable<?> responseStream = chatClient.prompt(prompt)
+                    .system(workerPrompt)
+                    .toolCallbacks(callbacksForStep)
+                    .stream()
+                    .chatClientResponse()
+                    .toIterable();
+
+            for (Object clientResponse : responseStream) {
+                ChatResponse chatResponse = extractChatResponse(clientResponse);
+                if (chatResponse == null) {
+                    continue;
+                }
+                lastChatResponse = chatResponse;
+                if (chatResponse.getResult() == null || chatResponse.getResult().getOutput() == null) {
+                    continue;
+                }
+
+                AssistantMessage output = chatResponse.getResult().getOutput();
+                String chunkText = output.getText();
+                String delta = extractDelta(streamedText.toString(), chunkText);
+                if (!delta.isEmpty()) {
+                    streamedText.append(delta);
+                    tokenStreamPublisher.appendAssistantStream(streamMessageId, delta);
+                }
+            }
+        } catch (RuntimeException ex) {
+            tokenStreamPublisher.finishAssistantStream(streamMessageId);
+            throw ex;
+        }
+
+        try {
+            if (lastChatResponse == null) {
+                lastChatResponse = chatClient.prompt(prompt)
+                        .system(workerPrompt)
+                        .toolCallbacks(callbacksForStep)
+                        .call()
+                        .chatClientResponse()
+                        .chatResponse();
+            }
+
+            if (streamedText.length() == 0
+                    && lastChatResponse != null
+                    && lastChatResponse.getResult() != null
+                    && lastChatResponse.getResult().getOutput() != null
+                    && lastChatResponse.getResult().getOutput().getText() != null
+                    && !lastChatResponse.getResult().getOutput().getText().isBlank()) {
+                String fallbackText = lastChatResponse.getResult().getOutput().getText();
+                streamedText.append(fallbackText);
+                tokenStreamPublisher.appendAssistantStream(streamMessageId, fallbackText);
+            }
+
+            return new StreamExecutionResult(lastChatResponse, streamedText.toString().trim());
+        } finally {
+            tokenStreamPublisher.finishAssistantStream(streamMessageId);
+        }
+    }
+
+    private ChatResponse extractChatResponse(Object clientResponse) {
+        if (clientResponse == null) {
+            return null;
+        }
+        try {
+            Method method = clientResponse.getClass().getMethod("chatResponse");
+            Object value = method.invoke(clientResponse);
+            if (value instanceof ChatResponse) {
+                return (ChatResponse) value;
+            }
+        } catch (Exception ignored) {
+            // Best effort; fallback is handled by caller.
+        }
+        return null;
+    }
+
+    private String extractDelta(String accumulatedText, String currentChunkText) {
+        if (currentChunkText == null || currentChunkText.isEmpty()) {
+            return "";
+        }
+        if (accumulatedText == null || accumulatedText.isEmpty()) {
+            return currentChunkText;
+        }
+        if (currentChunkText.startsWith(accumulatedText)) {
+            return currentChunkText.substring(accumulatedText.length());
+        }
+        return currentChunkText;
+    }
+
+    private static class StreamExecutionResult {
+        private final ChatResponse chatResponse;
+        private final String streamedText;
+
+        private StreamExecutionResult(ChatResponse chatResponse, String streamedText) {
+            this.chatResponse = chatResponse;
+            this.streamedText = streamedText == null ? "" : streamedText;
+        }
     }
 
     private String responsibilityBoundary() {

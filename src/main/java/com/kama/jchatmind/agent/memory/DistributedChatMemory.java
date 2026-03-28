@@ -55,6 +55,18 @@ public class DistributedChatMemory implements ChatMemory {
         return KEY_PREFIX + conversationId;
     }
 
+    private void evictCacheKey(String key) {
+        if (!StringUtils.hasLength(key)) {
+            return;
+        }
+        try {
+            // Prefer async key freeing to avoid DEL blocking on large list values.
+            redisTemplate.unlink(key);
+        } catch (RuntimeException ex) {
+            redisTemplate.delete(key);
+        }
+    }
+
     @Override
     public void add(String conversationId, List<Message> messages) {
         if (messages == null || messages.isEmpty()) {
@@ -62,42 +74,60 @@ public class DistributedChatMemory implements ChatMemory {
         }
 
         String key = getCacheKey(conversationId);
-        redisTemplate.delete(key);
-
-        int startIndex = Math.max(0, messages.size() - maxMessages);
-        List<Message> messagesToSave = messages.subList(startIndex, messages.size());
-        List<ChatMessageDTO> dtoList = convertToDTOs(messagesToSave);
-
         try {
+            evictCacheKey(key);
+
+            int startIndex = Math.max(0, messages.size() - maxMessages);
+            List<Message> messagesToSave = messages.subList(startIndex, messages.size());
+            List<ChatMessageDTO> dtoList = convertToDTOs(messagesToSave);
+            if (dtoList.isEmpty()) {
+                return;
+            }
+
+            List<String> payloads = new ArrayList<>(dtoList.size());
             for (ChatMessageDTO dto : dtoList) {
                 String json = objectMapper.writeValueAsString(dto);
-                redisTemplate.opsForList().rightPush(key, json);
+                payloads.add(json);
             }
+            redisTemplate.opsForList().rightPushAll(key, payloads.toArray(new String[0]));
             redisTemplate.expire(key, CACHE_TTL_HOURS, TimeUnit.HOURS);
         } catch (JsonProcessingException e) {
             log.error("Failed to serialize message to Redis JSON", e);
+        } catch (RuntimeException e) {
+            log.warn("Skip Redis cache write due to runtime exception, conversationId={}, error={}",
+                    conversationId, e.getMessage());
         }
     }
 
     @Override
     public List<Message> get(String conversationId) {
         String key = getCacheKey(conversationId);
-        Long size = redisTemplate.opsForList().size(key);
+        try {
+            Long size = redisTemplate.opsForList().size(key);
 
-        if (size != null && size > 0) {
-            List<Object> cachedData = redisTemplate.opsForList().range(key, -maxMessages, -1);
-            if (cachedData != null && !cachedData.isEmpty()) {
-                try {
-                    List<ChatMessageDTO> dtoList = new ArrayList<>();
-                    for (Object obj : cachedData) {
-                        dtoList.add(objectMapper.readValue((String) obj, ChatMessageDTO.class));
+            if (size != null && size > 0) {
+                List<Object> cachedData = redisTemplate.opsForList().range(key, -maxMessages, -1);
+                if (cachedData != null && !cachedData.isEmpty()) {
+                    try {
+                        List<ChatMessageDTO> dtoList = new ArrayList<>();
+                        for (Object obj : cachedData) {
+                            dtoList.add(objectMapper.readValue((String) obj, ChatMessageDTO.class));
+                        }
+                        return convertToMessages(dtoList);
+                    } catch (Exception e) {
+                        log.error("Failed to deserialize Redis cache, fallback to DB", e);
+                        try {
+                            evictCacheKey(key);
+                        } catch (RuntimeException deleteEx) {
+                            log.warn("Failed to clear corrupted Redis cache, key={}, error={}",
+                                    key, deleteEx.getMessage());
+                        }
                     }
-                    return convertToMessages(dtoList);
-                } catch (Exception e) {
-                    log.error("Failed to deserialize Redis cache, fallback to DB", e);
-                    redisTemplate.delete(key);
                 }
             }
+        } catch (RuntimeException e) {
+            log.warn("Skip Redis cache read due to runtime exception, conversationId={}, error={}",
+                    conversationId, e.getMessage());
         }
 
         List<ChatMessageDTO> dbMessages = chatMessageFacadeService.getChatMessagesBySessionIdRecently(conversationId, maxMessages);
@@ -112,7 +142,12 @@ public class DistributedChatMemory implements ChatMemory {
 
     @Override
     public void clear(String conversationId) {
-        redisTemplate.delete(getCacheKey(conversationId));
+        try {
+            evictCacheKey(getCacheKey(conversationId));
+        } catch (RuntimeException e) {
+            log.warn("Skip Redis cache clear due to runtime exception, conversationId={}, error={}",
+                    conversationId, e.getMessage());
+        }
     }
 
     private List<ChatMessageDTO> convertToDTOs(List<Message> messages) {
